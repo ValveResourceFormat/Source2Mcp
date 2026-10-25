@@ -16,7 +16,7 @@ internal sealed class McpServer : IDisposable
     private const string Meta = "io.modelcontextprotocol/";
 
     private const string Instructions = """
-        Drives Source 2 games (CS2, Deadlock and Dota 2) through VConsole2, the console protocol of the engine. Start the game with launch. Use console for all other work: console runs commands as the game console does.
+        Drives Source 2 games (CS2, Deadlock, Dota 2 and Half-Life: Alyx) through VConsole2, the console protocol of the engine. Start the game with launch. Use console for all other work: console runs commands as the game console does.
         The server starts the game with -insecure. The game cannot connect to online servers. Load local maps only.
         A successful call replies with compact JSON that omits null and empty fields. A failed call replies with plain text and isError.
         Positions are [x, y, z] in world units. Angles are [pitch, yaw, roll] in degrees, with pitch positive downwards. The vrf server uses the same conventions, so you can copy a camera from one server to the other.
@@ -26,6 +26,7 @@ internal sealed class McpServer : IDisposable
         To find entities by a part of the class or name, use ent_find for server entities and cl_ent_find for client entities. To read the origin and angles of one entity, use cl_dumpentity with its index.
         When launch or map loads a map, it also runs a setup. In CS2, after the setup, no bots are in the game, the round does not end, and the player is alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view. In Dota 2, after the setup, no creeps spawn, the fog of war is off, and the game runs with no hero.
         In Dota 2, the camera tool cannot move the camera. Use dota_camera_set_lookatpos and dota_camera_distance through console.
+        Half-Life: Alyx starts with -novr, in a window, without VR. It has no setup. It sends no cvar list, so cvars finds nothing in it.
         For repeatable screenshots, do these steps first:
         1. Run noclip one time, so that gravity does not move the camera.
         2. Run cl_drawhud 0, r_drawviewmodel 0 and r_drawpanorama 0.

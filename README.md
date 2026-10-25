@@ -1,6 +1,6 @@
 # source2mcp
 
-An MCP server that drives Source 2 games (CS2, Deadlock and Dota 2) through VConsole2, the console protocol of the engine. It injects no code into the game.
+An MCP server that drives Source 2 games (CS2, Deadlock, Dota 2 and Half-Life: Alyx) through VConsole2, the console protocol of the engine. It injects no code into the game.
 
 ## Run
 

@@ -42,6 +42,7 @@ internal sealed class VConsoleClient : IAsyncDisposable
     private readonly Task _receiveTask;
 
     private volatile ApplicationInfo? _applicationInfo;
+    private volatile int _commandVersion = PacketVersion.Default;
     private volatile Exception? _closeReason;
     private bool _historyReplayed;
     private bool _sawStartBannerText;
@@ -228,7 +229,7 @@ internal sealed class VConsoleClient : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(command);
 
-        return SendAsync(PacketTag.Cmnd, PacketVersion.Default, PayloadText.ToNullTerminated(command), cancellationToken);
+        return SendAsync(PacketTag.Cmnd, (ushort)_commandVersion, PayloadText.ToNullTerminated(command), cancellationToken);
     }
 
     /// <summary>Sends PING and waits for the PONG with the same payload. Returns the round-trip time.</summary>
@@ -372,7 +373,7 @@ internal sealed class VConsoleClient : IAsyncDisposable
             switch (packet.Tag)
             {
                 case PacketTag.Ainf:
-                    ProcessApplicationInfo(payload);
+                    ProcessApplicationInfo(payload, packet.Version);
                     break;
 
                 case PacketTag.Chan:
@@ -418,7 +419,7 @@ internal sealed class VConsoleClient : IAsyncDisposable
         }
     }
 
-    private void ProcessApplicationInfo(ReadOnlySpan<byte> payload)
+    private void ProcessApplicationInfo(ReadOnlySpan<byte> payload, ushort version)
     {
         var info = ApplicationInfo.Parse(payload);
 
@@ -428,6 +429,8 @@ internal sealed class VConsoleClient : IAsyncDisposable
             return;
         }
 
+        // The game drops CMND with a version other than its protocol version, without an error. Half-Life: Alyx uses 211.
+        _commandVersion = version;
         _applicationInfo = info;
         _firstInfo.TrySetResult();
     }

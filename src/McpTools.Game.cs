@@ -13,7 +13,7 @@ internal sealed partial class McpTools
 {
     private const int LogLimit = 1000;
 
-    private const string SetupDescription = "After the map is loaded, make a stable test environment. In CS2, the setup removes the bots, stops the round end, freeze time and fall damage, and puts the player alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view, so that the camera tool can move the camera. The intro view shows only on the first load of dl_hideout. On other Deadlock maps, the setup looks for the intro view for 5 seconds, then stops. In Dota 2, the setup stops the creep spawns, removes the fog of war, and starts the game with no hero.";
+    private const string SetupDescription = "After the map is loaded, make a stable test environment. In CS2, the setup removes the bots, stops the round end, freeze time and fall damage, and puts the player alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view, so that the camera tool can move the camera. The intro view shows only on the first load of dl_hideout. On other Deadlock maps, the setup looks for the intro view for 5 seconds, then stops. In Dota 2, the setup stops the creep spawns, removes the fog of war, and starts the game with no hero. Half-Life: Alyx has no setup.";
 
     // FCVAR_DEVELOPMENTONLY and FCVAR_DEFENSIVE
     private const ulong HiddenFlags = 0x2 | 0x1_0000_0000;
@@ -317,7 +317,7 @@ internal sealed partial class McpTools
         return new ScreenshotReply(path, bitmap.Width, bitmap.Height);
     }
 
-    [Tool("Find cvars and commands in the list that the game sends over VConsole2. Returns the value, default, range, flags and help text. A hidden entry is development-only (flag 0x2) or defensive (flag 0x100000000). The game can ignore a hidden command without an error message. Test a hidden command with console before you use it. CS2 does not send hidden entries. Deadlock and Dota 2 send them, and the reply marks them with 'hidden'.", Concurrent = true)]
+    [Tool("Find cvars and commands in the list that the game sends over VConsole2. Returns the value, default, range, flags and help text. A hidden entry is development-only (flag 0x2) or defensive (flag 0x100000000). The game can ignore a hidden command without an error message. Test a hidden command with console before you use it. CS2 does not send hidden entries. Deadlock and Dota 2 send them, and the reply marks them with 'hidden'. Half-Life: Alyx sends no list.", Concurrent = true)]
     private CvarsReply Cvars(
         [Description("Text to find in the name. Case does not matter. An empty text matches all entries.")] string query = "",
         [Description("Also find the text in the help text.")] bool searchHelp = false,

@@ -11,8 +11,9 @@ namespace Source2Mcp;
 internal sealed class GameSession : IAsyncDisposable
 {
     // The client writes this line when its connection to its local server is complete and the player is in the game.
-    // The client connects to the local server at 127.0.0.1, not to loopback.
-    private const string ReadyLine = "CL:  Signon traffic \"server\"";
+    // The client connects to the local server at 127.0.0.1, not to loopback. The line ends with "server" in CS2, Deadlock
+    // and Dota 2, and with "client" in Half-Life: Alyx.
+    private const string ReadyLine = "CL:  Signon traffic \"";
 
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan FirstPacketTimeout = TimeSpan.FromSeconds(15);
@@ -127,6 +128,8 @@ internal sealed class GameSession : IAsyncDisposable
             "+sv_cheats", "1",
         ];
 
+        arguments.AddRange(profile.ExtraArguments);
+
         if (map != null)
         {
             arguments.Add("+map");
@@ -214,6 +217,9 @@ internal sealed class GameSession : IAsyncDisposable
             case Game.Cs2:
             case Game.Dota2:
                 return true;
+
+            case Game.Hlvr:
+                return false;
 
             case Game.Deadlock:
                 // The hideout intro plays only one time in each process

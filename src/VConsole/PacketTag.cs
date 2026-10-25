@@ -30,7 +30,7 @@ internal static class PacketTag
 /// <summary>The version that each tag must have in the packet header.</summary>
 internal static class PacketVersion
 {
-    /// <summary>The version of most tags.</summary>
+    /// <summary>The version of most tags in current builds. CMND uses the version of the AINF that the game sends.</summary>
     public const ushort Default = 212;
 
     public const ushort Ping = 1;
