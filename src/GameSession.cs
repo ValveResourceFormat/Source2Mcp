@@ -133,6 +133,10 @@ internal sealed class GameSession : IAsyncDisposable
         if (tools)
         {
             arguments.Add("-tools");
+
+            // Tools mode stops rendering while the game window has no focus
+            arguments.Add("+r_always_render_all_windows");
+            arguments.Add("1");
         }
 
         if (map != null)
