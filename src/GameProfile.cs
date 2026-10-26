@@ -53,7 +53,14 @@ internal sealed record GameProfile(
         EyeHeight: 0,
         // default_fov has no effect on the game camera, and the camera FOV cvars are hidden
         FovCommand: null,
-        ExtraArguments: []);
+        // The game must not take the focus from other windows
+        ExtraArguments:
+        [
+            "+dota_activate_window_on_hero_picking_start", "0",
+            "+dota_activate_window_on_match_found", "0",
+            "+dota_activate_window_on_ready_check", "0",
+            "+dota_activate_window_on_unpause", "0",
+        ]);
 
     public static readonly GameProfile HalfLifeAlyx = new(
         Game.Hlvr,
