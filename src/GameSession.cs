@@ -83,7 +83,7 @@ internal sealed class GameSession : IAsyncDisposable
     public VConsoleClient Client { get; }
 
     /// <summary>Starts the game and connects to VConsole2. Use <see cref="WaitUntilReadyAsync"/> next.</summary>
-    public static async Task<GameSession> StartAsync(GameProfile profile, string? map, int width, int height, CancellationToken cancellationToken)
+    public static async Task<GameSession> StartAsync(GameProfile profile, string? map, int width, int height, bool tools, CancellationToken cancellationToken)
     {
         var gamePath = profile.GetGamePath();
         var executable = profile.GetExecutablePath(gamePath);
@@ -129,6 +129,11 @@ internal sealed class GameSession : IAsyncDisposable
         ];
 
         arguments.AddRange(profile.ExtraArguments);
+
+        if (tools)
+        {
+            arguments.Add("-tools");
+        }
 
         if (map != null)
         {

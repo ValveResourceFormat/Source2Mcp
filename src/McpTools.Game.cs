@@ -89,6 +89,7 @@ internal sealed partial class McpTools
         [Description("Window width in pixels.")][Range(320, 7680)] int width = 1280,
         [Description("Window height in pixels.")][Range(240, 4320)] int height = 720,
         [Description(SetupDescription)] bool setup = true,
+        [Description("Start the game in tools mode with -tools. Tools mode shows the defensive cvars and commands, for example screenshot. Deadlock cannot start in tools mode and stops with an error.")] bool tools = false,
         CancellationToken cancellationToken = default)
     {
         var profile = GameProfile.Get(game);
@@ -110,7 +111,7 @@ internal sealed partial class McpTools
         }
 
         var start = Stopwatch.GetTimestamp();
-        var session = await GameSession.StartAsync(profile, map, width, height, cancellationToken).ConfigureAwait(false);
+        var session = await GameSession.StartAsync(profile, map, width, height, tools, cancellationToken).ConfigureAwait(false);
 
         // get_log and get_status can read the session while the game loads
         _session = session;

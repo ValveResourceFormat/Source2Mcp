@@ -20,7 +20,7 @@ claude mcp add --transport http source2mcp http://127.0.0.1:13339/mcp
 
 | Tool | What it does |
 |---|---|
-| `launch` | Starts the game, loads a map and runs the setup. |
+| `launch` | Starts the game, loads a map and runs the setup. With `tools`, it starts the game in tools mode. |
 | `map` | Loads a map and waits until the player is in the game. |
 | `console` | Runs console commands and returns their output. |
 | `camera` | Moves the camera and reads it back with `getpos`. In Dota 2, it only reads the camera. |
