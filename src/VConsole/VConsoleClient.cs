@@ -73,6 +73,9 @@ internal sealed class VConsoleClient : IAsyncDisposable
 
     public bool IsConnected => _closeReason == null;
 
+    /// <summary>Why the connection closed, or null while it is open.</summary>
+    public string? CloseReason => _closeReason?.Message;
+
     /// <summary>The number of packets with a payload that this client could not read. The client skips them.</summary>
     public int InvalidPacketCount => Volatile.Read(ref _invalidPacketCount);
 

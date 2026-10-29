@@ -45,7 +45,7 @@ internal static class CommandPolicy
     }
 
     /// <summary>Splits the text at each ';' outside double quotes, as the console does.</summary>
-    private static List<string> Split(string commands)
+    public static List<string> Split(string commands)
     {
         var result = new List<string>();
         var start = 0;

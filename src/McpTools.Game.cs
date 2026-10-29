@@ -13,7 +13,16 @@ internal sealed partial class McpTools
 {
     private const int LogLimit = 1000;
 
+    // More than one frame, in case the game shows a frame later than the frame that ran the command
+    private const int DefaultSettleFrames = 3;
+
     private const string SetupDescription = "After the map is loaded, make a stable test environment. In CS2, the setup removes the bots, stops the round end, freeze time and fall damage, and puts the player alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view, so that the camera tool can move the camera. The intro view shows only on the first load of dl_hideout. On other Deadlock maps, the setup looks for the intro view for 5 seconds, then stops. In Dota 2, the setup stops the creep spawns, removes the fog of war, and starts the game with no hero. Half-Life: Alyx has no setup.";
+
+    private const string CompareDescription = "After the setup, prepare repeatable screenshots: set cl_drawhud 0, r_drawviewmodel 0 and r_drawpanorama 0, and r_always_render_all_windows 1 and r_vconsole_foregroundforcerender 1 where the game shows them. With a map, also turn noclip on, except in Dota 2. The reply gives the value of each cvar after the setup. quit and restore_cvars set the cvars back. Run it again after a map change, because the new player has no noclip.";
+
+    private const string ExposureDescription = "With 'compare', set mat_tonemap_force_min and mat_tonemap_force_max to this value, so that the exposure does not change. CS2 and Half-Life: Alyx only, because Deadlock and Dota 2 ignore these cvars. Without it, the exposure stays automatic.";
+
+    private const string HostFramerateDescription = "With 'compare', set host_framerate to this value, to lock the time step. Without it, host_framerate does not change.";
 
     // FCVAR_DEVELOPMENTONLY and FCVAR_DEFENSIVE
     private const ulong HiddenFlags = 0x2 | 0x1_0000_0000;
@@ -21,6 +30,9 @@ internal sealed partial class McpTools
     // getpos prints six decimals, and angles come back with float rounding near 1e-4
     private const float SettledTolerance = 0.01f;
     private const float NoteTolerance = 0.5f;
+
+    // Readings that are the same in sequence show that the camera stopped
+    private const int StoppedReadings = 3;
 
     private static readonly TimeSpan ScreenshotTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
@@ -30,18 +42,32 @@ internal sealed partial class McpTools
 
     private volatile GameSession? _session;
 
-    private sealed record LaunchReply(Game Game, int ProcessId, int Port, string? Map, bool Setup, string CommandLine, float Seconds);
+    // A List or Dictionary in a reply is omitted when it is empty
 
-    private sealed record MapReply(string Map, bool Setup, float Seconds);
+    private sealed record LaunchReply(Game Game, int ProcessId, int Port, string? Map, bool Setup, string CommandLine, float Seconds, CompareReply? Compare, PreviousSessionReply? PreviousSession);
+
+    /// <param name="CvarsLeftChanged">The cvars that the previous game had changed when it stopped. Its config can keep them.</param>
+    private sealed record PreviousSessionReply(Game Game, string Reason, List<string> LastLines, List<LeftChangedConVar> CvarsLeftChanged);
+
+    private sealed record MapReply(string Map, bool Setup, float Seconds, CompareReply? Compare);
+
+    /// <param name="Cvars">The value of each cvar after the setup. Null for a cvar that the game does not have or hides.</param>
+    private sealed record CompareReply(Dictionary<string, string?> Cvars, bool? Noclip, string? Note);
 
     /// <param name="Severity">Null for an ordinary message.</param>
     private sealed record OutputLine(string Channel, string Text, LogSeverity? Severity);
 
-    private sealed record ConsoleReply(bool Completed, IReadOnlyList<OutputLine> Lines, string? Note);
+    /// <param name="Unrecognized">The names of the commands that the game reported as unknown.</param>
+    /// <param name="Mismatches">The cvars that have another value than the request after the commands.</param>
+    private sealed record ConsoleReply(bool Completed, List<OutputLine> Lines, List<string> Unrecognized, List<ValueMismatch> Mismatches, string? Note);
+
+    private sealed record ValueMismatch(string Name, string Requested, string Value);
 
     private sealed record CameraReply(Vector3 Position, Vector3 Angles, float? Fov, string? Note);
 
     private sealed record ScreenshotReply(string Path, int Width, int Height);
+
+    private sealed record RestoreReply(List<string> Restored, List<LeftChangedConVar> LeftChanged, string? Note);
 
     private sealed record ConVarReply(string Name, string? Value, string? Default, string? Min, string? Max, string Flags, bool? Command, bool? Hidden, string? Help, IReadOnlyList<string> EnumValues);
 
@@ -64,9 +90,12 @@ internal sealed partial class McpTools
         int? ConVars = null,
         int? Channels = null,
         int? InvalidPackets = null,
-        string? LastInvalidPacket = null);
+        string? LastInvalidPacket = null,
+        string? Stopped = null,
+        List<string>? LastLines = null,
+        List<LeftChangedConVar>? ChangedCvars = null);
 
-    private sealed record QuitReply(int ExitCode);
+    private sealed record QuitReply(int ExitCode, List<string> RestoredCvars, List<LeftChangedConVar> CvarsLeftChanged, string? Note);
 
     public async ValueTask DisposeAsync()
     {
@@ -82,7 +111,7 @@ internal sealed partial class McpTools
         _callLock.Dispose();
     }
 
-    [Tool("Start a game and connect to its VConsole2 port. The game starts with -insecure and sv_cheats 1, in a window. With 'map', the call returns when the map is loaded and the setup is complete. Without 'map', it returns when the game runs console commands. Only one game can run at a time.")]
+    [Tool("Start a game and connect to its VConsole2 port. The game starts with -insecure and sv_cheats 1, in a window. With 'map', the call returns when the map is loaded and the setup is complete. Without 'map', it returns when the game runs console commands. Only one game can run at a time. When the previous game exited or lost its connection, launch closes it and reports it in 'previous_session'. Launch sets engine_no_focus_sleep 0, so that the game renders at full rate without focus. quit and restore_cvars set it back.")]
     private async Task<object> Launch(
         [Description("The game to start.")] Game game,
         [Description("The local map to load, for example de_dust2.")] string? map = null,
@@ -90,6 +119,9 @@ internal sealed partial class McpTools
         [Description("Window height in pixels.")][Range(240, 4320)] int height = 720,
         [Description(SetupDescription)] bool setup = true,
         [Description("Start the game in tools mode with -tools. Tools mode shows the defensive cvars and commands, for example screenshot. Deadlock cannot start in tools mode and stops with an error.")] bool tools = false,
+        [Description(CompareDescription)] bool compare = false,
+        [Description(ExposureDescription)][Range(0d, 100d, MinimumIsExclusive = true)] float? exposure = null,
+        [Description(HostFramerateDescription)][Range(0d, 1000d, MinimumIsExclusive = true)] float? hostFramerate = null,
         CancellationToken cancellationToken = default)
     {
         var profile = GameProfile.Get(game);
@@ -99,15 +131,19 @@ internal sealed partial class McpTools
             ThrowIfInvalidMapName(map);
         }
 
+        ThrowIfCompareOptionsWithoutCompare(compare, exposure, hostFramerate);
+
+        PreviousSessionReply? previous = null;
+
         if (_session is { } current)
         {
-            if (!current.Process.HasExited)
-            {
-                throw new ToolException($"{current.Profile.Game} already runs as process {current.Process.Id}. Use quit first.");
-            }
+            var stopReason = current.GetStopReason() ?? throw new ToolException($"{current.Profile.Game} already runs as process {current.Process.Id}. Use quit first.");
 
             _session = null;
-            await current.DisposeAsync().ConfigureAwait(false);
+            previous = new PreviousSessionReply(current.Profile.Game, stopReason, current.GetLastLines(), current.GetChangedConVars());
+
+            // Stops a process that lost its connection
+            await current.AbortAsync().ConfigureAwait(false);
         }
 
         var start = Stopwatch.GetTimestamp();
@@ -116,6 +152,7 @@ internal sealed partial class McpTools
         // get_log and get_status can read the session while the game loads
         _session = session;
         var runSetup = map != null && setup && session.HasSetup();
+        CompareReply? compareReply = null;
 
         try
         {
@@ -124,6 +161,13 @@ internal sealed partial class McpTools
             if (runSetup)
             {
                 await session.RunSetupAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await session.SetBackgroundRenderAsync(cancellationToken).ConfigureAwait(false);
+
+            if (compare)
+            {
+                compareReply = await SetUpCompareAsync(session, hasPlayer: map != null, exposure, hostFramerate, cancellationToken).ConfigureAwait(false);
             }
         }
         catch
@@ -134,16 +178,20 @@ internal sealed partial class McpTools
         }
 
         var seconds = (float)Stopwatch.GetElapsedTime(start).TotalSeconds;
-        return new LaunchReply(game, session.Process.Id, session.Port, map, runSetup, session.CommandLine, seconds);
+        return new LaunchReply(game, session.Process.Id, session.Port, map, runSetup, session.CommandLine, seconds, compareReply, previous);
     }
 
     [Tool("Load a local map in the running game and wait until the player is in the game. Then run the setup, as launch does. The reply does not contain the log of the map load. To read that log, use get_log.")]
     private async Task<object> Map(
         [Description("The local map to load, for example de_mirage.")] string map,
         [Description(SetupDescription)] bool setup = true,
+        [Description(CompareDescription)] bool compare = false,
+        [Description(ExposureDescription)][Range(0d, 100d, MinimumIsExclusive = true)] float? exposure = null,
+        [Description(HostFramerateDescription)][Range(0d, 1000d, MinimumIsExclusive = true)] float? hostFramerate = null,
         CancellationToken cancellationToken = default)
     {
         ThrowIfInvalidMapName(map);
+        ThrowIfCompareOptionsWithoutCompare(compare, exposure, hostFramerate);
 
         var session = GetSession();
         var runSetup = setup && session.HasSetup();
@@ -156,11 +204,18 @@ internal sealed partial class McpTools
             await session.RunSetupAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        CompareReply? compareReply = null;
+
+        if (compare)
+        {
+            compareReply = await SetUpCompareAsync(session, hasPlayer: true, exposure, hostFramerate, cancellationToken).ConfigureAwait(false);
+        }
+
         var seconds = (float)Stopwatch.GetElapsedTime(start).TotalSeconds;
-        return new MapReply(map, runSetup, seconds);
+        return new MapReply(map, runSetup, seconds, compareReply);
     }
 
-    [Tool("Run console commands in the game and return their output. Separate commands with ';'. The game does not link output to a command, so the reply can include lines from other sources. The server refuses commands that connect to a server, map commands (use the map tool), and quit.")]
+    [Tool("Run console commands in the game and return their output. Separate commands with ';'. The game does not link output to a command, so the reply can include lines from other sources. The server refuses commands that connect to a server, map commands (use the map tool), and quit. 'unrecognized' lists the commands that the game reported as unknown. A hidden command can do nothing without a report. Before a command sets a cvar ('name value', toggle or incrementvar), the server records the value of the cvar, and quit and restore_cvars set it back. After the commands, the server reads each such cvar again, and 'mismatches' lists the cvars with another value than the request, for example a value out of range. Half-Life: Alyx sends no cvar list, so there the server records no cvar.")]
     private async Task<object> Console(
         [Description("One or more console commands, separated by ';'.")] string commands,
         [Description("Maximum number of seconds to wait for the game to run the commands. The game runs commands only while it renders frames.")][Range(1, 600)] int timeout = 15,
@@ -176,15 +231,61 @@ internal sealed partial class McpTools
         CommandPolicy.Check(commands);
 
         var session = GetSession();
+        var sets = ConVarText.FindSets(commands, session.Client.ConVars);
+
+        // A later set of the same cvar in the text wins
+        var requested = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var set in sets)
+        {
+            requested[set.Name] = set.Value;
+        }
+
+        await session.RecordOriginalValuesAsync(requested.Keys, cancellationToken).ConfigureAwait(false);
+
         var result = await session.Client.ExecuteAsync(commands, TimeSpan.FromSeconds(timeout), TimeSpan.FromSeconds(quietSeconds), cancellationToken).ConfigureAwait(false);
 
-        var count = Math.Min(result.Lines.Count, maxLines);
+        var output = new List<LogLine>(result.Lines.Count);
+        var unrecognized = new List<string>();
+
+        foreach (var line in result.Lines)
+        {
+            if (ConVarText.GetUnknownCommand(line.Text) is { } unknownName)
+            {
+                if (!unrecognized.Contains(unknownName, StringComparer.OrdinalIgnoreCase))
+                {
+                    unrecognized.Add(unknownName);
+                }
+
+                continue;
+            }
+
+            output.Add(line);
+        }
+
+        var count = Math.Min(output.Count, maxLines);
         var lines = new List<OutputLine>(count);
 
         for (var i = 0; i < count; i++)
         {
-            var line = result.Lines[i];
+            var line = output[i];
             lines.Add(new OutputLine(line.Channel, line.Text, ToReplySeverity(line.Severity)));
+        }
+
+        var mismatches = new List<ValueMismatch>();
+
+        // When the game did not run the commands, it does not run the read either
+        if (result.Completed && requested.Count > 0)
+        {
+            var values = await session.ReadBackAsync(requested.Keys, cancellationToken).ConfigureAwait(false);
+
+            foreach (var (name, requestedValue) in requested)
+            {
+                if (requestedValue != null && values.TryGetValue(name, out var value) && !ConVarText.ValuesEqual(requestedValue, value))
+                {
+                    mismatches.Add(new ValueMismatch(name, requestedValue, value));
+                }
+            }
         }
 
         string? note = null;
@@ -194,17 +295,17 @@ internal sealed partial class McpTools
             note = $"The game did not run the commands in {timeout} s. The lines show the output so far. Read later output with get_log.";
         }
 
-        if (result.Lines.Count > maxLines)
+        if (output.Count > maxLines)
         {
-            var lastSequence = result.Lines[count - 1].Sequence;
-            var cutNote = $"The reply shows the first {count} of {result.Lines.Count} lines. To read the other lines, use get_log with 'after' {lastSequence}, or set a larger 'max_lines'.";
+            var lastSequence = output[count - 1].Sequence;
+            var cutNote = $"The reply shows the first {count} of {output.Count} lines. To read the other lines, use get_log with 'after' {lastSequence}, or set a larger 'max_lines'.";
             note = note == null ? cutNote : note + " " + cutNote;
         }
 
-        return new ConsoleReply(result.Completed, lines, note);
+        return new ConsoleReply(result.Completed, lines, unrecognized, mismatches, note);
     }
 
-    [Tool("Move the player camera at once, then read the camera back from the game. 'position' is the eye position, as in the vrf server. It needs sv_cheats 1, which launch sets. Run noclip one time first, so that gravity does not move the camera. Do not crouch, because crouch moves the eye down. The game moves the camera in a later frame, so the tool reads the camera again until it matches the request, for a maximum of 1 second. With no arguments, it only reads the camera. In Deadlock, the game reports the third-person camera, not the eye. That camera is behind, right of and above the hero, and it turns with the yaw. Thus in Deadlock the reply does not match 'position'. On the Deadlock map dl_hideout, the game shows an intro view until the setup removes it. While the intro view shows, the game reports the intro camera, and the camera tool cannot move the camera. In Dota 2, the tool only reads the top-down game camera.")]
+    [Tool("Move the player camera at once, then read the camera back from the game. 'position' is the eye position, as in the vrf server. It needs sv_cheats 1, which launch sets. Run noclip one time first, so that gravity does not move the camera. Do not crouch, because crouch moves the eye down. The game moves the camera in a later frame, so the tool reads the camera again until it matches the request or stops moving, for a maximum of 1 second. A pitch beyond cl_pitchup or cl_pitchdown is limited, and the note gives the pitch. With no arguments, it only reads the camera. In Deadlock, the game reports the third-person camera, not the eye. That camera is behind, right of and above the hero, and it turns with the yaw. Thus in Deadlock the reply does not match 'position', and after a move the tool waits until the camera stops. On the Deadlock map dl_hideout, the game shows an intro view until the setup removes it. While the intro view shows, the game reports the intro camera, and the camera tool cannot move the camera. In Dota 2, the tool only reads the top-down game camera.")]
     private async Task<object> Camera(
         [Description("World position of the eye.")] Vector3? position = null,
         [Description("[pitch, yaw, roll] degrees to face, pitch positive downwards.")] Vector3? angles = null,
@@ -243,16 +344,61 @@ internal sealed partial class McpTools
         // The Deadlock readback is the third-person camera, which never matches the requested eye position
         var expectedPosition = profile.Game == Game.Deadlock ? null : position;
 
+        // The third-person camera follows a move over several frames, so its readings must also stop changing
+        var waitForStop = position != null && expectedPosition == null;
+
+        var expectedAngles = angles;
+        string? pitchNote = null;
+
+        if (angles is { } requestedAngles && GetPitchLimits(session) is { } limits)
+        {
+            var pitch = NormalizeAngle(requestedAngles.X);
+            var clampedPitch = Math.Clamp(pitch, -limits.Up, limits.Down);
+
+            if (clampedPitch != pitch)
+            {
+                expectedAngles = requestedAngles with { X = clampedPitch };
+                pitchNote = string.Create(CultureInfo.InvariantCulture, $"The game limits the pitch to {-limits.Up} to {limits.Down} (cl_pitchup and cl_pitchdown), so the pitch is {clampedPitch}.");
+            }
+        }
+
         // setpos and setang run on the server, so the client getpos shows them only after the next tick.
         // After noclip or a crouch, the client also moves the eye to its new height over about 0.3 s.
         var settleStart = Stopwatch.GetTimestamp();
         var (readPosition, readAngles) = await session.ReadCameraAsync(cancellationToken).ConfigureAwait(false);
+        var moved = false;
+        var sameReadings = 0;
 
-        while (!CameraMatches(expectedPosition, angles, readPosition, readAngles, SettledTolerance) && Stopwatch.GetElapsedTime(settleStart) < CameraSettleTimeout)
+        while (Stopwatch.GetElapsedTime(settleStart) < CameraSettleTimeout)
         {
+            var stopped = sameReadings >= StoppedReadings;
+
+            if (CameraMatches(expectedPosition, expectedAngles, readPosition, readAngles, SettledTolerance) && (!waitForStop || stopped))
+            {
+                break;
+            }
+
+            // A camera that moved and then stopped short of the request does not move more, for example at a wall
+            if (moved && stopped)
+            {
+                break;
+            }
+
             // Wait about one tick between readings, so that the log does not fill with getpos output
             await Task.Delay(CameraPollInterval, cancellationToken).ConfigureAwait(false);
-            (readPosition, readAngles) = await session.ReadCameraAsync(cancellationToken).ConfigureAwait(false);
+            var (nextPosition, nextAngles) = await session.ReadCameraAsync(cancellationToken).ConfigureAwait(false);
+
+            if (nextPosition == readPosition && nextAngles == readAngles)
+            {
+                sameReadings++;
+            }
+            else
+            {
+                moved = true;
+                sameReadings = 0;
+            }
+
+            (readPosition, readAngles) = (nextPosition, nextAngles);
         }
 
         float? readFov = null;
@@ -270,17 +416,23 @@ internal sealed partial class McpTools
         {
             note = "The game reports a different position. A wall or the floor can block the move, or the player crouches. Run noclip one time, then try again.";
         }
-        else if (!CameraMatches(null, angles, readPosition, readAngles, NoteTolerance))
+        else if (!CameraMatches(null, expectedAngles, readPosition, readAngles, NoteTolerance))
         {
             note = "The game reports different angles. The game limits the pitch, and roll can stay 0.";
+        }
+
+        if (pitchNote != null)
+        {
+            note = note == null ? pitchNote : pitchNote + " " + note;
         }
 
         return new CameraReply(readPosition, readAngles, readFov, note);
     }
 
-    [Tool("Take a screenshot of what the game renders, with the user interface, and save it to a PNG file. The game sends a JPEG image with quality 90 and the size of the window, and the server stores it as PNG without more loss. The game renders only while its window is visible. When another window covers the game window, the image shows an old frame.")]
+    [Tool("Take a screenshot of what the game renders, with the user interface, and save it to a PNG file. The game sends a JPEG image with quality 90 and the size of the window, and the server stores it as PNG without more loss. The game renders only while its window is visible. When another window covers the game window, the image shows an old frame. Before the request, the server waits for 'settle_frames' round trips through the command queue of the game. The game reads the queue one time in each frame, so each round trip ends in a later frame than the commands before it, for example a camera move.")]
     private async Task<object> Screenshot(
         [Description("Absolute path of the .png file to write. The default is a new file in the source2mcp folder in the temporary folder.")] string? path = null,
+        [Description("Number of round trips through the command queue of the game before the request. Each round trip waits for at least one frame. 0 takes the next frame that the game sends.")][Range(0, 30)] int settleFrames = DefaultSettleFrames,
         CancellationToken cancellationToken = default)
     {
         if (path != null && (!Path.IsPathFullyQualified(path) || !path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)))
@@ -289,6 +441,12 @@ internal sealed partial class McpTools
         }
 
         var session = GetSession();
+
+        for (var i = 0; i < settleFrames; i++)
+        {
+            await session.RunAsync("echo source2mcp frame", cancellationToken).ConfigureAwait(false);
+        }
+
         byte[] jpeg;
 
         try
@@ -407,7 +565,7 @@ internal sealed partial class McpTools
         return entries;
     }
 
-    [Tool("Report the game process and the VConsole2 connection.", Concurrent = true)]
+    [Tool("Report the game process and the VConsole2 connection, and the cvars that the server changed and did not restore. When the game exited or the connection closed, 'stopped' gives the exit code or the reason, and 'last_lines' the last log lines.", Concurrent = true)]
     private async Task<object> GetStatus(CancellationToken cancellationToken = default)
     {
         var session = _session;
@@ -420,6 +578,8 @@ internal sealed partial class McpTools
         var client = session.Client;
         var info = client.ApplicationInfo;
         var running = !session.Process.HasExited;
+        var stopReason = session.GetStopReason();
+        var lastLines = stopReason != null ? session.GetLastLines() : null;
         double? pingMs = null;
 
         if (running && client.IsConnected)
@@ -447,19 +607,103 @@ internal sealed partial class McpTools
             ConVars: client.ConVars.Count,
             Channels: client.Channels.Count,
             InvalidPackets: client.InvalidPacketCount,
-            LastInvalidPacket: client.LastInvalidPacket);
+            LastInvalidPacket: client.LastInvalidPacket,
+            Stopped: stopReason,
+            LastLines: lastLines,
+            ChangedCvars: session.GetChangedConVars());
     }
 
-    [Tool("Stop the game with the quit command. The server stops the process if it does not exit in 30 seconds. Returns the exit code.")]
+    [Tool("Set each cvar that console, launch or map changed back to the value that it had before the first change, then read it back. quit does this before the game exits, because the game saves archived cvars to the config of the user. 'left_changed' lists the cvars that do not have their original value.")]
+    private async Task<object> RestoreCvars(CancellationToken cancellationToken = default)
+    {
+        var session = GetSession();
+        var restore = await session.RestoreConVarsAsync(cancellationToken).ConfigureAwait(false);
+
+        return ToRestoreReply(session, restore);
+    }
+
+    [Tool("Set the changed cvars back as restore_cvars does, then stop the game with the quit command. The server stops the process if it does not exit in 30 seconds, or at once when the connection closed. Returns the exit code and the cvars that the game can keep in the config.")]
     private async Task<object> Quit(CancellationToken cancellationToken = default)
     {
         var session = _session ?? throw new ToolException("No game runs.");
+        var restored = new List<string>();
+        List<LeftChangedConVar> leftChanged;
+        string? note = null;
+
+        if (session.GetStopReason() is { } stopReason)
+        {
+            leftChanged = session.GetChangedConVars();
+
+            if (leftChanged.Count > 0)
+            {
+                note = $"{stopReason} The server could not restore the cvars.";
+            }
+        }
+        else
+        {
+            try
+            {
+                var reply = ToRestoreReply(session, await session.RestoreConVarsAsync(cancellationToken).ConfigureAwait(false));
+                restored = reply.Restored;
+                leftChanged = reply.LeftChanged;
+                note = reply.Note;
+            }
+            catch (Exception e) when (e is ToolException or IOException)
+            {
+                leftChanged = session.GetChangedConVars();
+                note = $"The restore of the cvars failed: {e.Message}";
+            }
+        }
+
         var exitCode = await session.QuitAsync(cancellationToken).ConfigureAwait(false);
 
         _session = null;
         await session.DisposeAsync().ConfigureAwait(false);
 
-        return new QuitReply(exitCode);
+        return new QuitReply(exitCode, restored, leftChanged, note);
+    }
+
+    private static async Task<CompareReply> SetUpCompareAsync(GameSession session, bool hasPlayer, float? exposure, float? hostFramerate, CancellationToken cancellationToken)
+    {
+        var setup = await session.SetUpCompareAsync(hasPlayer, exposure, hostFramerate, cancellationToken).ConfigureAwait(false);
+        var notes = new List<string>();
+
+        if (exposure == null)
+        {
+            notes.Add("The exposure is automatic. Give 'exposure' to lock it.");
+        }
+        else if (!session.Profile.HasTonemapForce)
+        {
+            notes.Add($"{session.Profile.Game} ignores mat_tonemap_force_min and mat_tonemap_force_max, so the exposure is automatic.");
+        }
+
+        if (hasPlayer && session.Profile.HasNoclip && setup.Noclip == null)
+        {
+            notes.Add("The game did not report the noclip state. Run getpos two times to make sure that the camera does not fall.");
+        }
+
+        var note = notes.Count > 0 ? string.Join(' ', notes) : null;
+        return new CompareReply(setup.Values, setup.Noclip, note);
+    }
+
+    private static void ThrowIfCompareOptionsWithoutCompare(bool compare, float? exposure, float? hostFramerate)
+    {
+        if (!compare && (exposure != null || hostFramerate != null))
+        {
+            throw new ArgumentException("'exposure' and 'host_framerate' apply only with 'compare' set to true.");
+        }
+    }
+
+    private static RestoreReply ToRestoreReply(GameSession session, ConVarRestore restore)
+    {
+        string? note = null;
+
+        if (session.Client.ConVars.Count == 0)
+        {
+            note = $"{session.Profile.Game} sends no cvar list, so console cannot tell a cvar from a command and does not record cvar changes. Only the cvars of launch and map are restored. Set the other cvars back yourself.";
+        }
+
+        return new RestoreReply(restore.Restored, restore.LeftChanged, note);
     }
 
     private GameSession GetSession()
@@ -488,6 +732,43 @@ internal sealed partial class McpTools
             && AngleDifference(requestedAngles.Z, readAngles.Z) <= tolerance;
     }
 
+    /// <summary>The pitch limits of the client, upwards and downwards in degrees, or null when the cvar list does not have them.</summary>
+    private static (float Up, float Down)? GetPitchLimits(GameSession session)
+    {
+        var conVars = session.Client.ConVars;
+
+        if (!conVars.TryGetValue("cl_pitchup", out var up) || !conVars.TryGetValue("cl_pitchdown", out var down))
+        {
+            return null;
+        }
+
+        if (!float.TryParse(up.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var upValue)
+            || !float.TryParse(down.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var downValue))
+        {
+            return null;
+        }
+
+        return (upValue, downValue);
+    }
+
+    /// <summary>The angle in degrees, from -180 to 180.</summary>
+    private static float NormalizeAngle(float angle)
+    {
+        var normalized = angle % 360f;
+
+        if (normalized > 180f)
+        {
+            return normalized - 360f;
+        }
+
+        if (normalized < -180f)
+        {
+            return normalized + 360f;
+        }
+
+        return normalized;
+    }
+
     /// <summary>The smallest difference between two angles in degrees, from 0 to 180.</summary>
     private static float AngleDifference(float a, float b)
     {
@@ -496,7 +777,7 @@ internal sealed partial class McpTools
         return difference > 180f ? 360f - difference : difference;
     }
 
-    private static string Format(float value) => value.ToString("0.######", CultureInfo.InvariantCulture);
+    internal static string Format(float value) => value.ToString("0.######", CultureInfo.InvariantCulture);
 
     private static LogSeverity? ToReplySeverity(LogSeverity severity) => severity == LogSeverity.Message ? null : severity;
 

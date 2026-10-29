@@ -27,11 +27,8 @@ internal sealed class McpServer : IDisposable
         When launch or map loads a map, it also runs a setup. In CS2, after the setup, no bots are in the game, the round does not end, and the player is alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view. In Dota 2, after the setup, no creeps spawn, the fog of war is off, and the game runs with no hero.
         In Dota 2, the camera tool cannot move the camera. Use dota_camera_set_lookatpos and dota_camera_distance through console.
         Half-Life: Alyx starts with -novr, in a window, without VR. It has no setup. It sends no cvar list, so cvars finds nothing in it.
-        For repeatable screenshots, do these steps first:
-        1. Run noclip one time, so that gravity does not move the camera.
-        2. Run cl_drawhud 0, r_drawviewmodel 0 and r_drawpanorama 0.
-        3. Set mat_tonemap_force_min and mat_tonemap_force_max to the same value, so that the exposure does not change.
-        4. Set host_framerate to lock the time step. To pause the game, set sv_pausable 1 and run pause. Do not set host_timescale 0.
+        The game runs with the config of the user and saves archived cvars to it on quit. The server records the value of each cvar before it first changes it, and quit sets the cvars back. restore_cvars does the same on request. Half-Life: Alyx sends no cvar list, so there console records no cvar, and you must set the cvars back yourself.
+        For repeatable screenshots, give compare to launch or map. It turns noclip on, hides the HUD, the view model and Panorama, and with exposure and host_framerate it locks the exposure and the time step. Deadlock and Dota 2 ignore the exposure cvars. To pause the game, set sv_pausable 1 and run pause. Do not set host_timescale 0.
         """;
 
     private static readonly string ProductVersion = typeof(McpServer).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0";

@@ -15,6 +15,8 @@ internal enum Game
 /// <param name="ModDirectory">The folder of the game in the <c>game</c> folder, which has the <c>maps</c> folder.</param>
 /// <param name="EyeHeight">The height of the eye above the position that <c>setpos</c> sets, for a player who stands in noclip.</param>
 /// <param name="FovCommand">The console command that sets the field of view, or null when no such command is known.</param>
+/// <param name="HasNoclip">The player can fly with noclip, so that gravity does not move the camera.</param>
+/// <param name="HasTonemapForce">The game uses mat_tonemap_force_min and mat_tonemap_force_max for the exposure.</param>
 /// <param name="ExtraArguments">Command-line arguments that this game needs in addition to the common ones.</param>
 internal sealed record GameProfile(
     Game Game,
@@ -23,6 +25,8 @@ internal sealed record GameProfile(
     string ModDirectory,
     float EyeHeight,
     string? FovCommand,
+    bool HasNoclip,
+    bool HasTonemapForce,
     IReadOnlyList<string> ExtraArguments)
 {
     public static readonly GameProfile CounterStrike2 = new(
@@ -32,6 +36,8 @@ internal sealed record GameProfile(
         ModDirectory: "csgo",
         EyeHeight: 64,
         FovCommand: "fov_cs_debug",
+        HasNoclip: true,
+        HasTonemapForce: true,
         ExtraArguments: []);
 
     public static readonly GameProfile Deadlock = new(
@@ -42,6 +48,9 @@ internal sealed record GameProfile(
         // getpos reports the third-person camera, so the camera tool cannot read back the eye position
         EyeHeight: 64,
         FovCommand: null,
+        HasNoclip: true,
+        // The cvars exist, but the exposure does not change
+        HasTonemapForce: false,
         ExtraArguments: []);
 
     public static readonly GameProfile Dota2 = new(
@@ -53,6 +62,10 @@ internal sealed record GameProfile(
         EyeHeight: 0,
         // default_fov has no effect on the game camera, and the camera FOV cvars are hidden
         FovCommand: null,
+        // The game runs with no hero
+        HasNoclip: false,
+        // The cvars exist, but the exposure does not change
+        HasTonemapForce: false,
         // The game must not take the focus from other windows
         ExtraArguments:
         [
@@ -70,6 +83,8 @@ internal sealed record GameProfile(
         EyeHeight: 64,
         // default_fov has no effect, and fov_desired is saved to the config
         FovCommand: null,
+        HasNoclip: true,
+        HasTonemapForce: true,
         // The game runs in a window with keyboard and mouse movement, and does not start SteamVR
         ExtraArguments: ["-novr"]);
 

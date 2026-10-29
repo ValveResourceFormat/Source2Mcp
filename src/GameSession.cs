@@ -3,9 +3,24 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Numerics;
+using System.Text;
 using VConsole;
 
 namespace Source2Mcp;
+
+// Replies serialize these types. The serializer omits an empty List or Dictionary, but not an empty IReadOnlyList.
+
+/// <summary>The result of <see cref="GameSession.RestoreConVarsAsync"/>.</summary>
+internal sealed record ConVarRestore(List<string> Restored, List<LeftChangedConVar> LeftChanged);
+
+/// <summary>A cvar that this server changed and did not restore.</summary>
+/// <param name="Value">The value that the game reports, or null when it was not read.</param>
+internal sealed record LeftChangedConVar(string Name, string Original, string? Value);
+
+/// <summary>The result of <see cref="GameSession.SetUpCompareAsync"/>.</summary>
+/// <param name="Values">The value of each cvar after the setup, or null for a cvar that the game does not have or hides.</param>
+/// <param name="Noclip">True when noclip is on, or null when noclip was not run or the game did not report its state.</param>
+internal sealed record CompareSetup(Dictionary<string, string?> Values, bool? Noclip);
 
 /// <summary>One game process that this server started, and its VConsole2 connection.</summary>
 internal sealed class GameSession : IAsyncDisposable
@@ -14,6 +29,8 @@ internal sealed class GameSession : IAsyncDisposable
     // The client connects to the local server at 127.0.0.1, not to loopback. The line ends with "server" in CS2, Deadlock
     // and Dota 2, and with "client" in Half-Life: Alyx.
     private const string ReadyLine = "CL:  Signon traffic \"";
+
+    private const int StopLogLines = 10;
 
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan FirstPacketTimeout = TimeSpan.FromSeconds(15);
@@ -57,7 +74,28 @@ internal sealed class GameSession : IAsyncDisposable
         "dota_dev forcegamestart",
     ];
 
+    // Cvars that keep the game rendering at full rate while its window has no focus. engine_no_focus_sleep is archived,
+    // so it is set through the console and restored, not on the command line, which the game also saves to the config.
+    private static readonly ConVarSet[] BackgroundRenderConVars =
+    [
+        new("engine_no_focus_sleep", "0"),
+    ];
+
+    // The two render cvars are hidden in CS2 without -tools, so the game can lack them
+    private static readonly ConVarSet[] CompareConVars =
+    [
+        new("cl_drawhud", "0"),
+        new("r_drawviewmodel", "0"),
+        new("r_drawpanorama", "0"),
+        new("r_always_render_all_windows", "1"),
+        new("r_vconsole_foregroundforcerender", "1"),
+    ];
+
     private bool _hideoutIntroRemoved;
+
+    // The value of each cvar before this server first changed it
+    private readonly Dictionary<string, string> _originalValues = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Lock _originalValuesLock = new();
 
     private GameSession(GameProfile profile, string gamePath, Process process, int port, string commandLine, VConsoleClient client)
     {
@@ -165,18 +203,358 @@ internal sealed class GameSession : IAsyncDisposable
         }
     }
 
-    /// <summary>Throws when the game process exited or the connection closed.</summary>
+    /// <summary>Throws when the game process exited or the connection closed. The message has the last log lines.</summary>
     public void ThrowIfStopped()
+    {
+        var reason = GetStopReason();
+
+        if (reason == null)
+        {
+            return;
+        }
+
+        var message = new StringBuilder(reason);
+        message.Append(" Use launch to start it again.");
+
+        var lastLines = GetLastLines();
+
+        if (lastLines.Count > 0)
+        {
+            message.Append(" The last log lines:");
+
+            foreach (var line in lastLines)
+            {
+                message.Append('\n').Append(line);
+            }
+        }
+
+        throw new ToolException(message.ToString());
+    }
+
+    /// <summary>Why the session cannot run commands, or null while the game runs and the connection is open.</summary>
+    public string? GetStopReason()
     {
         if (Process.HasExited)
         {
-            throw new ToolException($"The game exited with code {Process.ExitCode}. Use launch to start it again.");
+            return string.Create(CultureInfo.InvariantCulture, $"The game exited with code {Process.ExitCode}.");
         }
 
         if (!Client.IsConnected)
         {
-            throw new ToolException("The VConsole2 connection to the game closed. Use quit, then launch.");
+            return $"The VConsole2 connection to the game closed: {Client.CloseReason}";
         }
+
+        return null;
+    }
+
+    /// <summary>The text of the newest log lines of this connection, oldest first.</summary>
+    public List<string> GetLastLines()
+    {
+        var lines = Client.Log.GetLast(StopLogLines, static line => !line.IsHistory);
+        var texts = new List<string>(lines.Count);
+
+        foreach (var line in lines)
+        {
+            texts.Add(line.Text);
+        }
+
+        return texts;
+    }
+
+    /// <summary>The cvars that this server changed and did not restore, with their original values.</summary>
+    public List<LeftChangedConVar> GetChangedConVars()
+    {
+        var changed = new List<LeftChangedConVar>();
+
+        lock (_originalValuesLock)
+        {
+            foreach (var (name, original) in _originalValues)
+            {
+                changed.Add(new LeftChangedConVar(name, original, null));
+            }
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// Reads cvar values with console queries. A cvar that prints no value, for example a hidden or unknown one, is not in the result.
+    /// </summary>
+    public async Task<Dictionary<string, string>> QueryConVarsAsync(IReadOnlyCollection<string> names, CancellationToken cancellationToken)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (names.Count == 0)
+        {
+            return values;
+        }
+
+        var lines = await RunAsync(string.Join("; ", names), cancellationToken).ConfigureAwait(false);
+
+        foreach (var name in names)
+        {
+            if (ConVarText.FindValue(lines, name) is { } value)
+            {
+                values[name] = value;
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// Stores the current value of each cvar that this server did not change before, so that <see cref="RestoreConVarsAsync"/> can
+    /// set it again. A name that is not in the cvar list is stored only when the game prints a value for it. A name that is
+    /// neither in the list nor prints a value is no cvar of the game, or a hidden one, which the game does not change.
+    /// </summary>
+    public async Task RecordOriginalValuesAsync(IEnumerable<string> names, CancellationToken cancellationToken)
+    {
+        var newNames = new List<string>();
+
+        lock (_originalValuesLock)
+        {
+            foreach (var name in names)
+            {
+                if (!_originalValues.ContainsKey(name) && !newNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+                {
+                    newNames.Add(name);
+                }
+            }
+        }
+
+        if (newNames.Count == 0)
+        {
+            return;
+        }
+
+        // The query also reads cvars without change notifications, so it comes before the value in the list
+        var values = await QueryConVarsAsync(newNames, cancellationToken).ConfigureAwait(false);
+
+        lock (_originalValuesLock)
+        {
+            foreach (var name in newNames)
+            {
+                if (values.TryGetValue(name, out var value))
+                {
+                    _originalValues[name] = value;
+                }
+                else if (Client.ConVars.TryGetValue(name, out var conVar) && !conVar.IsCommand)
+                {
+                    _originalValues[name] = conVar.Value;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the cvars after a change. A cvar that has its original value again is no longer reported as changed.
+    /// </summary>
+    public async Task<Dictionary<string, string>> ReadBackAsync(IReadOnlyCollection<string> names, CancellationToken cancellationToken)
+    {
+        var values = await QueryConVarsAsync(names, cancellationToken).ConfigureAwait(false);
+
+        lock (_originalValuesLock)
+        {
+            foreach (var (name, value) in values)
+            {
+                if (_originalValues.TryGetValue(name, out var original) && ConVarText.ValuesEqual(original, value))
+                {
+                    _originalValues.Remove(name);
+                }
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// Records the original values, sets the cvars that the game has, and reads them back. A cvar that the game does not have
+    /// is skipped, and its value in the result is null.
+    /// </summary>
+    public async Task<Dictionary<string, string?>> SetConVarsAsync(IReadOnlyList<ConVarSet> sets, CancellationToken cancellationToken)
+    {
+        var names = new List<string>(sets.Count);
+
+        foreach (var set in sets)
+        {
+            names.Add(set.Name);
+        }
+
+        await RecordOriginalValuesAsync(names, cancellationToken).ConfigureAwait(false);
+
+        var commands = new List<string>();
+        var known = new List<string>();
+
+        lock (_originalValuesLock)
+        {
+            foreach (var set in sets)
+            {
+                // Only a cvar that the game has gets a recorded value
+                if (_originalValues.ContainsKey(set.Name))
+                {
+                    commands.Add($"{set.Name} {set.Value}");
+                    known.Add(set.Name);
+                }
+            }
+        }
+
+        var effective = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in names)
+        {
+            effective[name] = null;
+        }
+
+        if (commands.Count == 0)
+        {
+            return effective;
+        }
+
+        await RunAsync(string.Join("; ", commands), cancellationToken).ConfigureAwait(false);
+
+        var values = await ReadBackAsync(known, cancellationToken).ConfigureAwait(false);
+
+        foreach (var name in known)
+        {
+            effective[name] = GetReadValue(values, name);
+        }
+
+        return effective;
+    }
+
+    /// <summary>Sets the cvars that keep the game rendering while its window has no focus. <see cref="RestoreConVarsAsync"/> undoes it.</summary>
+    public Task<Dictionary<string, string?>> SetBackgroundRenderAsync(CancellationToken cancellationToken) => SetConVarsAsync(BackgroundRenderConVars, cancellationToken);
+
+    /// <summary>
+    /// Hides the HUD, the view model and Panorama, keeps the game rendering in the background, and sets the exposure and the time step
+    /// when they are given. With <paramref name="hasPlayer"/>, it also turns noclip on. <see cref="RestoreConVarsAsync"/> undoes the cvars.
+    /// </summary>
+    public async Task<CompareSetup> SetUpCompareAsync(bool hasPlayer, float? exposure, float? hostFramerate, CancellationToken cancellationToken)
+    {
+        List<ConVarSet> sets = [.. CompareConVars];
+
+        if (exposure is { } exposureValue && Profile.HasTonemapForce)
+        {
+            var text = McpTools.Format(exposureValue);
+            sets.Add(new ConVarSet("mat_tonemap_force_min", text));
+            sets.Add(new ConVarSet("mat_tonemap_force_max", text));
+        }
+
+        if (hostFramerate is { } rate)
+        {
+            sets.Add(new ConVarSet("host_framerate", McpTools.Format(rate)));
+        }
+
+        var values = await SetConVarsAsync(sets, cancellationToken).ConfigureAwait(false);
+        bool? noclip = null;
+
+        if (hasPlayer && Profile.HasNoclip)
+        {
+            noclip = await TurnOnNoclipAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return new CompareSetup(values, noclip);
+    }
+
+    /// <summary>Returns true when noclip is on, or null when the game does not report the state.</summary>
+    private async Task<bool?> TurnOnNoclipAsync(CancellationToken cancellationToken)
+    {
+        // noclip toggles, so a second run turns it on again when the first run turned it off
+        for (var i = 0; i < 2; i++)
+        {
+            var lines = await RunAsync("noclip", cancellationToken).ConfigureAwait(false);
+
+            if (ContainsText(lines, "noclip ON"))
+            {
+                return true;
+            }
+
+            if (!ContainsText(lines, "noclip OFF"))
+            {
+                return null;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Sets each changed cvar to its original value and reads it back. A cvar that does not get its original value again
+    /// stays in the list of changed cvars.
+    /// </summary>
+    public async Task<ConVarRestore> RestoreConVarsAsync(CancellationToken cancellationToken)
+    {
+        var commands = new List<string>();
+        var names = new List<string>();
+        var leftChanged = new List<LeftChangedConVar>();
+        Dictionary<string, string> originals;
+
+        lock (_originalValuesLock)
+        {
+            originals = new Dictionary<string, string>(_originalValues, StringComparer.OrdinalIgnoreCase);
+        }
+
+        foreach (var (name, original) in originals)
+        {
+            // The console has no escape for a quote inside a quoted value
+            if (original.Contains('"', StringComparison.Ordinal))
+            {
+                leftChanged.Add(new LeftChangedConVar(name, original, null));
+                continue;
+            }
+
+            commands.Add($"{name} \"{original}\"");
+            names.Add(name);
+        }
+
+        var restored = new List<string>();
+
+        if (commands.Count == 0)
+        {
+            return new ConVarRestore(restored, leftChanged);
+        }
+
+        await RunAsync(string.Join("; ", commands), cancellationToken).ConfigureAwait(false);
+
+        var values = await ReadBackAsync(names, cancellationToken).ConfigureAwait(false);
+
+        foreach (var name in names)
+        {
+            var original = originals[name];
+            var value = GetReadValue(values, name);
+
+            if (value != null && ConVarText.ValuesEqual(original, value))
+            {
+                restored.Add(name);
+
+                lock (_originalValuesLock)
+                {
+                    _originalValues.Remove(name);
+                }
+            }
+            else
+            {
+                leftChanged.Add(new LeftChangedConVar(name, original, value));
+            }
+        }
+
+        return new ConVarRestore(restored, leftChanged);
+    }
+
+    /// <summary>The value from a query, or from the list for a cvar that prints no value, for example a hidden one.</summary>
+    private string? GetReadValue(Dictionary<string, string> values, string name)
+    {
+        if (values.TryGetValue(name, out var value))
+        {
+            return value;
+        }
+
+        if (Client.ConVars.TryGetValue(name, out var conVar) && !conVar.IsCommand)
+        {
+            return conVar.Value;
+        }
+
+        return null;
     }
 
     /// <summary>Loads a map and waits until the player is in the game.</summary>
@@ -275,16 +653,25 @@ internal sealed class GameSession : IAsyncDisposable
     /// <summary>Sends <c>quit</c>, waits for the process to exit, and stops it after a timeout. Returns the exit code.</summary>
     public async Task<int> QuitAsync(CancellationToken cancellationToken)
     {
+        var sent = false;
+
         if (!Process.HasExited && Client.IsConnected)
         {
             try
             {
                 await Client.SendCommandAsync("quit", cancellationToken).ConfigureAwait(false);
+                sent = true;
             }
             catch (IOException)
             {
-                // The connection closed. The timeout below stops the process.
+                // The connection closed. The process is stopped below.
             }
+        }
+
+        if (!sent && !Process.HasExited)
+        {
+            Log.Info($"Process {Process.Id} has no VConsole2 connection for quit. Stopping it.");
+            Stop(Process);
         }
 
         try
