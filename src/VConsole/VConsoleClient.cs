@@ -14,7 +14,10 @@ namespace VConsole;
 /// <param name="Completed">
 /// True when the marker line arrived before the timeout. False when the game did not process the command in time.
 /// </param>
-internal sealed record CommandResult(IReadOnlyList<LogLine> Lines, bool Completed);
+/// <param name="StoppedAtTimeout">
+/// True when the timeout came before the quiet interval passed, so the collection after the marker line stopped at the timeout.
+/// </param>
+internal sealed record CommandResult(IReadOnlyList<LogLine> Lines, bool Completed, bool StoppedAtTimeout);
 
 /// <summary>
 /// A VConsole2 client. It keeps the application information, the log channels, the cvar list and the recent log lines,
@@ -128,9 +131,9 @@ internal sealed class VConsoleClient : IAsyncDisposable
     /// It collects all log lines until the marker line. The server does not link output to a command,
     /// so the result can include lines from other sources.
     /// </summary>
-    /// <param name="timeout">The maximum time to wait for the marker line.</param>
+    /// <param name="timeout">The maximum time for the call, both to wait for the marker line and to collect lines after it.</param>
     /// <param name="quietInterval">
-    /// After the marker line, continue to collect lines until no line arrives for this interval.
+    /// After the marker line, continue to collect lines until no line arrives for this interval, or until the timeout.
     /// Use it for commands that complete in a later frame, for example a map load. Zero stops at the marker line.
     /// </param>
     /// <exception cref="IOException">The connection closed.</exception>
@@ -148,36 +151,37 @@ internal sealed class VConsoleClient : IAsyncDisposable
             await SendCommandAsync(command, cancellationToken).ConfigureAwait(false);
             await SendCommandAsync("echo " + marker, cancellationToken).ConfigureAwait(false);
 
-            using (var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource.CancelAfter(timeout);
+
+            try
             {
-                timeoutSource.CancelAfter(timeout);
-
-                try
+                while (true)
                 {
-                    while (true)
+                    var line = await listener.Reader.ReadAsync(timeoutSource.Token).ConfigureAwait(false);
+
+                    if (line.ChannelId == LogChannel.ConsoleId && line.Text == marker)
                     {
-                        var line = await listener.Reader.ReadAsync(timeoutSource.Token).ConfigureAwait(false);
-
-                        if (line.ChannelId == LogChannel.ConsoleId && line.Text == marker)
-                        {
-                            break;
-                        }
-
-                        lines.Add(line);
+                        break;
                     }
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    return new CommandResult(lines, Completed: false);
+
+                    lines.Add(line);
                 }
             }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return new CommandResult(lines, Completed: false, StoppedAtTimeout: false);
+            }
+
+            var stoppedAtTimeout = false;
 
             if (quietInterval > TimeSpan.Zero)
             {
-                await ReadUntilQuietAsync(listener.Reader, lines, quietInterval, cancellationToken).ConfigureAwait(false);
+                var quiet = await ReadUntilQuietAsync(listener.Reader, lines, quietInterval, timeoutSource.Token, cancellationToken).ConfigureAwait(false);
+                stoppedAtTimeout = !quiet;
             }
 
-            return new CommandResult(lines, Completed: true);
+            return new CommandResult(lines, Completed: true, stoppedAtTimeout);
         }
         catch (ChannelClosedException e)
         {
@@ -575,9 +579,12 @@ internal sealed class VConsoleClient : IAsyncDisposable
         }
     }
 
-    private static async Task ReadUntilQuietAsync(ChannelReader<LogLine> reader, List<LogLine> lines, TimeSpan quietInterval, CancellationToken cancellationToken)
+    /// <summary>Collects lines until no line arrives for the quiet interval, or until <paramref name="timeoutToken"/> is cancelled.</summary>
+    /// <returns>True when the quiet interval passed. False at the timeout.</returns>
+    private static async Task<bool> ReadUntilQuietAsync(ChannelReader<LogLine> reader, List<LogLine> lines, TimeSpan quietInterval, CancellationToken timeoutToken, CancellationToken cancellationToken)
     {
-        using var quietSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // The timeout token is linked to the caller's token, so it also stops on a cancelled call
+        using var quietSource = CancellationTokenSource.CreateLinkedTokenSource(timeoutToken);
 
         while (true)
         {
@@ -590,7 +597,7 @@ internal sealed class VConsoleClient : IAsyncDisposable
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                return;
+                return !timeoutToken.IsCancellationRequested;
             }
         }
     }

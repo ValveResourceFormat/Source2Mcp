@@ -93,7 +93,11 @@ internal sealed partial class McpTools
         string? LastInvalidPacket = null,
         string? Stopped = null,
         List<string>? LastLines = null,
-        List<LeftChangedConVar>? ChangedCvars = null);
+        List<LeftChangedConVar>? ChangedCvars = null,
+        BusyCall? Busy = null);
+
+    /// <param name="Tool">The call that runs now. Calls that are not concurrent wait until it returns.</param>
+    private sealed record BusyCall(string Tool, float Seconds);
 
     private sealed record QuitReply(int ExitCode, List<string> RestoredCvars, List<LeftChangedConVar> CvarsLeftChanged, string? Note);
 
@@ -218,8 +222,8 @@ internal sealed partial class McpTools
     [Tool("Run console commands in the game and return their output. Separate commands with ';'. The game does not link output to a command, so the reply can include lines from other sources. The server refuses commands that connect to a server, map commands (use the map tool), and quit. 'unrecognized' lists the commands that the game reported as unknown. A hidden command can do nothing without a report. Before a command sets a cvar ('name value', toggle or incrementvar), the server records the value of the cvar, and quit and restore_cvars set it back. After the commands, the server reads each such cvar again, and 'mismatches' lists the cvars with another value than the request, for example a value out of range. Half-Life: Alyx sends no cvar list, so there the server records no cvar.")]
     private async Task<object> Console(
         [Description("One or more console commands, separated by ';'.")] string commands,
-        [Description("Maximum number of seconds to wait for the game to run the commands. The game runs commands only while it renders frames.")][Range(1, 600)] int timeout = 15,
-        [Description("After the commands complete, continue to collect output until no line arrives for this number of seconds. Use it for commands that complete in a later frame.")][Range(0, 60)] int quietSeconds = 0,
+        [Description("Maximum number of seconds for the call: to wait for the game to run the commands, and to collect output after them. The game runs commands only while it renders frames.")][Range(1, 600)] int timeout = 15,
+        [Description("After the commands complete, continue to collect output until no line arrives for this number of seconds, or until the timeout. Use it for commands that complete in a later frame. Set it lower than the timeout.")][Range(0, 60)] int quietSeconds = 0,
         [Description("Maximum number of lines to return. The first lines are returned.")][Range(1, LogLimit)] int maxLines = 100,
         CancellationToken cancellationToken = default)
     {
@@ -293,6 +297,10 @@ internal sealed partial class McpTools
         if (!result.Completed)
         {
             note = $"The game did not run the commands in {timeout} s. The lines show the output so far. Read later output with get_log.";
+        }
+        else if (result.StoppedAtTimeout)
+        {
+            note = $"No {quietSeconds} s pause in the output came before the timeout of {timeout} s, so the collection stopped at the timeout. Another source can write a line every frame. Read later output with get_log.";
         }
 
         if (output.Count > maxLines)
@@ -565,14 +573,20 @@ internal sealed partial class McpTools
         return entries;
     }
 
-    [Tool("Report the game process and the VConsole2 connection, and the cvars that the server changed and did not restore. When the game exited or the connection closed, 'stopped' gives the exit code or the reason, and 'last_lines' the last log lines.", Concurrent = true)]
+    [Tool("Report the game process and the VConsole2 connection, and the cvars that the server changed and did not restore. When the game exited or the connection closed, 'stopped' gives the exit code or the reason, and 'last_lines' the last log lines. 'busy' names the call that runs now and its seconds so far: the calls that are not concurrent wait until it returns.", Concurrent = true)]
     private async Task<object> GetStatus(CancellationToken cancellationToken = default)
     {
         var session = _session;
+        BusyCall? busy = null;
+
+        if (_runningCall is { } runningCall)
+        {
+            busy = new BusyCall(runningCall.Tool, (float)Stopwatch.GetElapsedTime(runningCall.StartTimestamp).TotalSeconds);
+        }
 
         if (session == null)
         {
-            return new StatusReply(Running: false);
+            return new StatusReply(Running: false, Busy: busy);
         }
 
         var client = session.Client;
@@ -610,7 +624,8 @@ internal sealed partial class McpTools
             LastInvalidPacket: client.LastInvalidPacket,
             Stopped: stopReason,
             LastLines: lastLines,
-            ChangedCvars: session.GetChangedConVars());
+            ChangedCvars: session.GetChangedConVars(),
+            Busy: busy);
     }
 
     [Tool("Set each cvar that console, launch or map changed back to the value that it had before the first change, then read it back. quit does this before the game exits, because the game saves archived cvars to the config of the user. 'left_changed' lists the cvars that do not have their original value.")]

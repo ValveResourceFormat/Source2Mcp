@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
+using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using System.Reflection;
@@ -95,6 +96,11 @@ internal sealed partial class McpTools : IAsyncDisposable
     // The game state that the tools drive is global, so calls run one at a time unless marked concurrent
     private readonly SemaphoreSlim _callLock = new(1, 1);
 
+    // The call that holds the lock, so that get_status can name a call that blocks the others
+    private volatile RunningCall? _runningCall;
+
+    private sealed record RunningCall(string Tool, long StartTimestamp);
+
     public McpTools()
     {
         foreach (var method in typeof(McpTools).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic))
@@ -139,6 +145,7 @@ internal sealed partial class McpTools : IAsyncDisposable
             {
                 await _callLock.WaitAsync(cancellationToken).ConfigureAwait(false);
                 locked = true;
+                _runningCall = new RunningCall(name, Stopwatch.GetTimestamp());
             }
 
             var result = await Invoke(tool, arguments, cancellationToken).ConfigureAwait(false);
@@ -165,6 +172,7 @@ internal sealed partial class McpTools : IAsyncDisposable
         {
             if (locked)
             {
+                _runningCall = null;
                 _callLock.Release();
             }
         }
