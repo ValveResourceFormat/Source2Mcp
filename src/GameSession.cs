@@ -26,8 +26,7 @@ internal sealed record CompareSetup(Dictionary<string, string?> Values, bool? No
 internal sealed class GameSession : IAsyncDisposable
 {
     // The client writes this line when its connection to its local server is complete and the player is in the game.
-    // The client connects to the local server at 127.0.0.1, not to loopback. The line ends with "server" in CS2, Deadlock
-    // and Dota 2, and with "client" in Half-Life: Alyx.
+    // The client connects to the local server at 127.0.0.1, not to loopback.
     private const string ReadyLine = "CL:  Signon traffic \"";
 
     private const int StopLogLines = 10;
@@ -168,7 +167,7 @@ internal sealed class GameSession : IAsyncDisposable
 
         arguments.AddRange(profile.ExtraArguments);
 
-        if (tools)
+        if (tools || profile.CheatsNeedTools)
         {
             arguments.Add("-tools");
 
@@ -338,7 +337,7 @@ internal sealed class GameSession : IAsyncDisposable
                 {
                     _originalValues[name] = value;
                 }
-                else if (Client.ConVars.TryGetValue(name, out var conVar) && !conVar.IsCommand)
+                else if (Client.ConVars.TryGetValue(name, out var conVar) && conVar.Value != null)
                 {
                     _originalValues[name] = conVar.Value;
                 }
@@ -557,15 +556,33 @@ internal sealed class GameSession : IAsyncDisposable
         return null;
     }
 
-    /// <summary>Loads a map and waits until the player is in the game.</summary>
-    public async Task LoadMapAsync(string map, CancellationToken cancellationToken)
+    /// <summary>Loads a map, from an addon when <paramref name="addon"/> is given, and waits until the player is in the game.</summary>
+    public async Task LoadMapAsync(string map, string? addon, CancellationToken cancellationToken)
     {
-        Profile.ThrowIfNoMap(GamePath, map);
+        string command;
+
+        if (addon == null)
+        {
+            Profile.ThrowIfNoMap(GamePath, map);
+            command = "map " + map;
+        }
+        else
+        {
+            command = Profile.GetAddonMapCommand(GamePath, addon, map);
+
+            var listConVar = Profile.Addons?.EnabledListConVar;
+
+            // quit and restore_cvars set the list of enabled addons back
+            if (listConVar != null)
+            {
+                await RecordOriginalValuesAsync([listConVar], cancellationToken).ConfigureAwait(false);
+            }
+        }
 
         // The ready line of the previous map is already in the log
         var afterSequence = Client.Log.LastSequence;
 
-        await Client.SendCommandAsync("map " + map, cancellationToken).ConfigureAwait(false);
+        await Client.SendCommandAsync(command, cancellationToken).ConfigureAwait(false);
         await WaitUntilReadyAsync(map, afterSequence, cancellationToken).ConfigureAwait(false);
     }
 
@@ -606,6 +623,9 @@ internal sealed class GameSession : IAsyncDisposable
                 return true;
 
             case Game.Hlvr:
+            case Game.Steamvr:
+            case Game.DeskJob:
+            case Game.RobotRepair:
                 return false;
 
             case Game.Deadlock:
@@ -804,7 +824,8 @@ internal sealed class GameSession : IAsyncDisposable
 
     /// <summary>
     /// Throws when the game reports a different map after the log line <paramref name="afterSequence"/>. When the Deadlock client
-    /// cannot connect to its local server, it loads an empty map, and that map also writes the ready line.
+    /// cannot connect to its local server, or a game cannot mount the map of an addon, the game loads an empty or a start map,
+    /// and that map also writes the ready line.
     /// </summary>
     private void ThrowIfOtherMap(string map, long afterSequence)
     {
@@ -821,7 +842,7 @@ internal sealed class GameSession : IAsyncDisposable
 
         if (!string.Equals(loadedMap, map, StringComparison.OrdinalIgnoreCase))
         {
-            throw new ToolException($"The game loaded '{loadedMap}', not '{map}'. The client did not connect to its local server. Read get_log for errors.");
+            throw new ToolException($"The game loaded '{loadedMap}', not '{map}'. Read get_log for errors, for example a map that the game could not mount or a client that did not connect to its local server.");
         }
     }
 

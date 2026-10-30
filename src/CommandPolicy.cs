@@ -30,6 +30,10 @@ internal static class CommandPolicy
 
                 case "map":
                 case "changelevel":
+                case "map_workshop":
+                case "dota_launch_custom_game":
+                case "addon_play":
+                case "destinations_load_addon":
                     throw new ToolException($"'{name}' loads a map. Use the map tool, which waits until the map is loaded.");
 
                 case "playdemo":

@@ -12,6 +12,7 @@ internal static class PacketTag
     public const uint Chan = 'C' | ('H' << 8) | ('A' << 16) | ('N' << 24);
     public const uint Prnt = 'P' | ('R' << 8) | ('N' << 16) | ('T' << 24);
     public const uint Cvrb = 'C' | ('V' << 8) | ('R' << 16) | ('B' << 24);
+    public const uint Cvar = 'C' | ('V' << 8) | ('A' << 16) | ('R' << 24);
     public const uint Cmnd = 'C' | ('M' << 8) | ('N' << 16) | ('D' << 24);
     public const uint Ping = 'P' | ('I' << 8) | ('N' << 16) | ('G' << 24);
     public const uint Pong = 'P' | ('O' << 8) | ('N' << 16) | ('G' << 24);

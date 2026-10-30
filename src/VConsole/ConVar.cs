@@ -1,18 +1,22 @@
+using System.Buffers.Binary;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using ValveKeyValue;
 using ValveResourceFormat.ResourceTypes;
 
 namespace VConsole;
 
-/// <summary>One cvar or command from CVRB.</summary>
+/// <summary>One cvar or command from CVRB or CVAR.</summary>
 /// <param name="Flags">FCVAR flags. Values use more than 32 bits.</param>
+/// <param name="Value">The current value, or null from CVAR, which has no values.</param>
+/// <param name="DefaultValue">The default value, or null from CVAR, which has no values.</param>
 /// <param name="EnumValues">The names of the enum values.</param>
 internal sealed record ConVar(
     string Name,
     ulong Flags,
-    string Value,
+    string? Value,
     string HelpText,
-    string DefaultValue,
+    string? DefaultValue,
     string MinValue,
     string MaxValue,
     bool IsCommand,
@@ -59,6 +63,61 @@ internal sealed record ConVar(
         }
 
         return conVars;
+    }
+
+    /// <summary>
+    /// Reads CVAR, which older builds send for each cvar and command instead of CVRB. It has the name, the flags, the range and
+    /// the kind, but no value, default or help text.
+    /// </summary>
+    /// <exception cref="InvalidDataException">The payload has neither of the two known sizes.</exception>
+    public static ConVar ParsePacket(ReadOnlySpan<byte> payload)
+    {
+        const int NameSize = 64;
+        const int FlagsOffset = 64;
+        const int RangeOffset = 72;
+
+        var minValue = string.Empty;
+        var maxValue = string.Empty;
+        byte bits;
+
+        switch (payload.Length)
+        {
+            // The range is two f32 values
+            case 81:
+                var min = BinaryPrimitives.ReadSingleBigEndian(payload[RangeOffset..]);
+                var max = BinaryPrimitives.ReadSingleBigEndian(payload[(RangeOffset + 4)..]);
+
+                // A cvar with no range has 0 for both
+                if (min != 0 || max != 0)
+                {
+                    minValue = min.ToString(CultureInfo.InvariantCulture);
+                    maxValue = max.ToString(CultureInfo.InvariantCulture);
+                }
+
+                bits = payload[80];
+                break;
+
+            // The range is two texts of 64 bytes
+            case 201:
+                minValue = PayloadText.Read(payload.Slice(RangeOffset, NameSize), out _);
+                maxValue = PayloadText.Read(payload.Slice(RangeOffset + NameSize, NameSize), out _);
+                bits = payload[200];
+                break;
+
+            default:
+                throw new InvalidDataException($"CVAR has {payload.Length} bytes, not 81 or 201.");
+        }
+
+        return new ConVar(
+            Name: PayloadText.Read(payload[..NameSize], out _),
+            Flags: BinaryPrimitives.ReadUInt64BigEndian(payload[FlagsOffset..]),
+            Value: null,
+            HelpText: string.Empty,
+            DefaultValue: null,
+            MinValue: minValue,
+            MaxValue: maxValue,
+            IsCommand: (bits & 0x01) != 0,
+            EnumValues: []);
     }
 
     private static ConVar FromKeyValues(KVObject entry)

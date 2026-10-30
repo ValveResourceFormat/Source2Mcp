@@ -30,6 +30,10 @@ internal sealed class VConsoleClient : IAsyncDisposable
     private const string EndBannerText = "=============== End VConsole Buffered Messages ===============";
     private const string ConnectionLinePrefix = "VConsole client connection from ";
 
+    // A game with no echo command reports an unknown command in this form
+    private const string UnknownCommandPrefix = "Unknown command: ";
+    private const string UnknownEchoLine = UnknownCommandPrefix + "echo";
+
     private readonly TcpClient _tcp;
     private readonly NetworkStream _stream;
     private readonly PipeReader _reader;
@@ -52,6 +56,9 @@ internal sealed class VConsoleClient : IAsyncDisposable
     private bool _sawEndBannerText;
     private long _sequence;
     private long _markerId;
+
+    // True when the game has no echo command
+    private volatile bool _markerIsCommand;
     private int _invalidPacketCount;
     private volatile string? _lastInvalidPacket;
 
@@ -128,7 +135,8 @@ internal sealed class VConsoleClient : IAsyncDisposable
 
     /// <summary>
     /// Runs a console command and collects its output. The client sends the command, then <c>echo</c> with a unique marker.
-    /// It collects all log lines until the marker line. The server does not link output to a command,
+    /// It collects all log lines until the marker line. In a game with no <c>echo</c>, the client sends the marker as a
+    /// command and waits for the report of the unknown command. The server does not link output to a command,
     /// so the result can include lines from other sources.
     /// </summary>
     /// <param name="timeout">The maximum time for the call, both to wait for the marker line and to collect lines after it.</param>
@@ -148,8 +156,12 @@ internal sealed class VConsoleClient : IAsyncDisposable
 
         try
         {
+            var markerIsCommand = _markerIsCommand;
+            var markerCommand = markerIsCommand ? marker : "echo " + marker;
+            var markerLine = markerIsCommand ? UnknownCommandPrefix + marker : marker;
+
             await SendCommandAsync(command, cancellationToken).ConfigureAwait(false);
-            await SendCommandAsync("echo " + marker, cancellationToken).ConfigureAwait(false);
+            await SendCommandAsync(markerCommand, cancellationToken).ConfigureAwait(false);
 
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(timeout);
@@ -160,8 +172,18 @@ internal sealed class VConsoleClient : IAsyncDisposable
                 {
                     var line = await listener.Reader.ReadAsync(timeoutSource.Token).ConfigureAwait(false);
 
-                    if (line.ChannelId == LogChannel.ConsoleId && line.Text == marker)
+                    // The echo output is on the Console channel. The report of an unknown command can be on another channel.
+                    var isMarkerChannel = markerIsCommand || line.ChannelId == LogChannel.ConsoleId;
+
+                    if (line.Text == markerLine && isMarkerChannel)
                     {
+                        break;
+                    }
+
+                    // The game has no echo, so the report of the unknown command takes the place of the marker
+                    if (!markerIsCommand && line.Text == UnknownEchoLine)
+                    {
+                        _markerIsCommand = true;
                         break;
                     }
 
@@ -401,6 +423,11 @@ internal sealed class VConsoleClient : IAsyncDisposable
                         _conVars[conVar.Name] = conVar;
                     }
 
+                    break;
+
+                case PacketTag.Cvar:
+                    var packetConVar = ConVar.ParsePacket(payload);
+                    _conVars[packetConVar.Name] = packetConVar;
                     break;
 
                 case PacketTag.Pong:
