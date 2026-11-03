@@ -399,6 +399,7 @@ internal sealed class VConsoleClient : IAsyncDisposable
         {
             var payload = packet.Payload.Span;
 
+            // A console client skips the packets that have no case
             switch (packet.Tag)
             {
                 case PacketTag.Ainf:
@@ -441,8 +442,6 @@ internal sealed class VConsoleClient : IAsyncDisposable
                 case PacketTag.Bugs:
                     ProcessScreenshot(payload);
                     break;
-
-                // A console client skips all other packets
             }
         }
         catch (InvalidDataException e)
