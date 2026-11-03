@@ -732,6 +732,14 @@ internal sealed class GameSession : IAsyncDisposable
         // The log can already have the restart lines from the map load, so only lines after this sequence number count
         var afterSequence = Client.Log.LastSequence;
 
+        // Without a T spawn point the player stays unassigned and has no pawn, so setpos does nothing. ent_create places
+        // the spawn point where the player looks; noclip and setpos move the pawn from there.
+        if (ContainsText(await RunAsync("ent_find info_player_terrorist", cancellationToken).ConfigureAwait(false), "Found 0 matches"))
+        {
+            await RunAsync("ent_create info_player_terrorist", cancellationToken).ConfigureAwait(false);
+            Log.Info("The map has no info_player_terrorist. The setup created one.");
+        }
+
         await RunAsync(string.Join("; ", CounterStrikeSetupCommands), cancellationToken).ConfigureAwait(false);
 
         // jointeam also starts a match, so only the BeginMatch line after the restart message shows the end of the restart
