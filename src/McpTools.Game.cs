@@ -124,6 +124,8 @@ internal sealed partial class McpTools
         [Description("The local map to load, for example de_dust2. To load a map from an addon, use the map tool after launch.")] string? map = null,
         [Description("Window width in pixels.")][Range(320, 7680)] int width = 1280,
         [Description("Window height in pixels.")][Range(240, 4320)] int height = 720,
+        [Description("Left edge of the window on the virtual desktop in pixels, for example on a second screen. Give it with 'y'.")][Range(-32768, 32767)] int? x = null,
+        [Description("Top edge of the window on the virtual desktop in pixels. Give it with 'x'.")][Range(-32768, 32767)] int? y = null,
         [Description(SetupDescription)] bool setup = true,
         [Description("Start the game in tools mode with -tools. Tools mode shows the defensive cvars and commands, for example screenshot. SteamVR Home always starts in tools mode, because it allows sv_cheats only there. Deadlock cannot start in tools mode and stops with an error.")] bool tools = false,
         [Description(CompareDescription)] bool compare = false,
@@ -140,6 +142,11 @@ internal sealed partial class McpTools
 
         ThrowIfCompareOptionsWithoutCompare(compare, exposure, hostFramerate);
 
+        if ((x == null) != (y == null))
+        {
+            throw new ArgumentException("Give 'x' and 'y' together.");
+        }
+
         PreviousSessionReply? previous = null;
 
         if (_session is { } current)
@@ -154,7 +161,7 @@ internal sealed partial class McpTools
         }
 
         var start = Stopwatch.GetTimestamp();
-        var session = await GameSession.StartAsync(profile, map, width, height, tools, cancellationToken).ConfigureAwait(false);
+        var session = await GameSession.StartAsync(profile, map, width, height, x, y, tools, cancellationToken).ConfigureAwait(false);
 
         // get_log and get_status can read the session while the game loads
         _session = session;

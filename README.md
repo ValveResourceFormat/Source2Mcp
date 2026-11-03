@@ -20,7 +20,7 @@ claude mcp add --transport http source2mcp http://127.0.0.1:13339/mcp
 
 | Tool | What it does |
 |---|---|
-| `launch` | Starts the game, loads a map and runs the setup. With `tools`, it starts the game in tools mode. With `compare`, it prepares repeatable screenshots. |
+| `launch` | Starts the game, loads a map and runs the setup. With `tools`, it starts the game in tools mode. With `x` and `y`, it places the window. With `compare`, it prepares repeatable screenshots. |
 | `map` | Loads a map and waits until the player is in the game. With `addon`, it loads the map from an addon or a workshop item. Takes `compare` as `launch` does. |
 | `console` | Runs console commands and returns their output, the unknown commands, and the cvars that did not get the requested value. |
 | `camera` | Moves the camera and reads it back with `getpos`. In Dota 2, it only reads the camera. |

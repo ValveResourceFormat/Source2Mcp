@@ -120,7 +120,7 @@ internal sealed class GameSession : IAsyncDisposable
     public VConsoleClient Client { get; }
 
     /// <summary>Starts the game and connects to VConsole2. Use <see cref="WaitUntilReadyAsync"/> next.</summary>
-    public static async Task<GameSession> StartAsync(GameProfile profile, string? map, int width, int height, bool tools, CancellationToken cancellationToken)
+    public static async Task<GameSession> StartAsync(GameProfile profile, string? map, int width, int height, int? x, int? y, bool tools, CancellationToken cancellationToken)
     {
         var gamePath = profile.GetGamePath();
         var executable = profile.GetExecutablePath(gamePath);
@@ -164,6 +164,11 @@ internal sealed class GameSession : IAsyncDisposable
             "+hostport", hostPort.ToString(CultureInfo.InvariantCulture),
             "+sv_cheats", "1",
         ];
+
+        if (x is { } left && y is { } top)
+        {
+            arguments.AddRange(["-x", left.ToString(CultureInfo.InvariantCulture), "-y", top.ToString(CultureInfo.InvariantCulture)]);
+        }
 
         arguments.AddRange(profile.ExtraArguments);
 
