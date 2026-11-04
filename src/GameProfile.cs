@@ -203,6 +203,18 @@ internal sealed record GameProfile(
         }
     }
 
+    /// <summary>Checks that a folder in <c>{ModDirectory}_addons</c> has the compiled map, which tools mode mounts with -addon.</summary>
+    /// <exception cref="ToolException">The addon folder has no such map.</exception>
+    public void ThrowIfNoLocalAddonMap(string gamePath, string addon, string map)
+    {
+        var path = GetLocalAddonMapPath(gamePath, addon, map);
+
+        if (!File.Exists(path))
+        {
+            throw new ToolException($"The addon '{addon}' has no map '{map}'. The file {path} does not exist.");
+        }
+    }
+
     /// <summary>Returns the console commands that load the map from the addon.</summary>
     /// <exception cref="ToolException">The server cannot load addon maps in this game, or the addon has no such map.</exception>
     public string GetAddonMapCommand(string gamePath, string addon, string map)
@@ -217,7 +229,7 @@ internal sealed record GameProfile(
 
         if (Addons.Local)
         {
-            var localPath = Path.Combine(gamePath, ModDirectory + "_addons", addon, "maps", map + ".vpk");
+            var localPath = GetLocalAddonMapPath(gamePath, addon, map);
 
             if (File.Exists(localPath))
             {
@@ -246,6 +258,8 @@ internal sealed record GameProfile(
 
         throw new ToolException($"{Game} has no map '{map}' in the addon '{addon}'. These files do not exist or do not have the map: {string.Join(", ", checkedPaths)}.");
     }
+
+    private string GetLocalAddonMapPath(string gamePath, string addon, string map) => Path.Combine(gamePath, ModDirectory + "_addons", addon, "maps", map + ".vpk");
 
     /// <summary>True when the package has the map, as in a game or a workshop item that ships its maps in a package.</summary>
     private static bool PackageHasMap(string packagePath, string map)

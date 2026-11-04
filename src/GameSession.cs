@@ -29,12 +29,22 @@ internal sealed class GameSession : IAsyncDisposable
     // The client connects to the local server at 127.0.0.1, not to loopback.
     private const string ReadyLine = "CL:  Signon traffic \"";
 
+    // The map command writes the first line when it starts the load and the second when it refuses the map name
+    private const string MapStartLine = "Loading map \"";
+    private const string InvalidMapLine = ":  invalid map name";
+
+    // CS2 map_workshop writes this line instead of the map start line
+    private const string WorkshopMapStartLine = "Loading custom game \"";
+
     private const int StopLogLines = 10;
 
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan FirstPacketTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan RetryInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>Tools mode with an addon compiles stale addon assets before the map loads.</summary>
+    private static readonly TimeSpan AddonToolsReadyTimeout = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan SetupTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan QuitTimeout = TimeSpan.FromSeconds(30);
@@ -96,9 +106,10 @@ internal sealed class GameSession : IAsyncDisposable
     private readonly Dictionary<string, string> _originalValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Lock _originalValuesLock = new();
 
-    private GameSession(GameProfile profile, string gamePath, Process process, int port, string commandLine, VConsoleClient client)
+    private GameSession(GameProfile profile, string gamePath, Process process, int port, string commandLine, VConsoleClient client, string? addon)
     {
         Profile = profile;
+        Addon = addon;
         GamePath = gamePath;
         Process = process;
         Port = port;
@@ -107,6 +118,9 @@ internal sealed class GameSession : IAsyncDisposable
     }
 
     public GameProfile Profile { get; }
+
+    /// <summary>The local addon folder that tools mode mounted with -addon, or null.</summary>
+    public string? Addon { get; }
 
     /// <summary>The <c>game</c> folder of the installation.</summary>
     public string GamePath { get; }
@@ -120,7 +134,7 @@ internal sealed class GameSession : IAsyncDisposable
     public VConsoleClient Client { get; }
 
     /// <summary>Starts the game and connects to VConsole2. Use <see cref="WaitUntilReadyAsync"/> next.</summary>
-    public static async Task<GameSession> StartAsync(GameProfile profile, string? map, int width, int height, bool tools, CancellationToken cancellationToken)
+    public static async Task<GameSession> StartAsync(GameProfile profile, string? map, string? addon, int width, int height, int? x, int? y, bool tools, CancellationToken cancellationToken)
     {
         var gamePath = profile.GetGamePath();
         var executable = profile.GetExecutablePath(gamePath);
@@ -130,7 +144,11 @@ internal sealed class GameSession : IAsyncDisposable
             throw new ToolException($"{executable} does not exist. Verify the game files in Steam.");
         }
 
-        if (map != null)
+        if (addon != null)
+        {
+            profile.ThrowIfNoLocalAddonMap(gamePath, addon, map ?? throw new ArgumentException("'addon' needs 'map'."));
+        }
+        else if (map != null)
         {
             profile.ThrowIfNoMap(gamePath, map);
         }
@@ -165,9 +183,20 @@ internal sealed class GameSession : IAsyncDisposable
             "+sv_cheats", "1",
         ];
 
+        if (x is { } left && y is { } top)
+        {
+            arguments.AddRange(["-x", left.ToString(CultureInfo.InvariantCulture), "-y", top.ToString(CultureInfo.InvariantCulture)]);
+        }
+
         arguments.AddRange(profile.ExtraArguments);
 
-        if (tools || profile.CheatsNeedTools)
+        if (addon != null)
+        {
+            arguments.Add("-addon");
+            arguments.Add(addon);
+        }
+
+        if (tools || addon != null || profile.CheatsNeedTools)
         {
             arguments.Add("-tools");
 
@@ -179,7 +208,9 @@ internal sealed class GameSession : IAsyncDisposable
         if (map != null)
         {
             arguments.Add("+map");
-            arguments.Add(map);
+
+            // In tools mode the map validation refuses the plain name of an addon map, and the maps/ path loads it
+            arguments.Add(addon != null ? "maps/" + map : map);
         }
 
         var commandLine = string.Join(' ', arguments);
@@ -192,7 +223,7 @@ internal sealed class GameSession : IAsyncDisposable
         {
             var client = await ConnectAsync(game, port, cancellationToken).ConfigureAwait(false);
 
-            return new GameSession(profile, gamePath, game, port, commandLine, client);
+            return new GameSession(profile, gamePath, game, port, commandLine, client, addon);
         }
         catch
         {
@@ -566,6 +597,11 @@ internal sealed class GameSession : IAsyncDisposable
             Profile.ThrowIfNoMap(GamePath, map);
             command = "map " + map;
         }
+        else if (string.Equals(addon, Addon, StringComparison.OrdinalIgnoreCase))
+        {
+            Profile.ThrowIfNoLocalAddonMap(GamePath, addon, map);
+            command = "map maps/" + map;
+        }
         else
         {
             command = Profile.GetAddonMapCommand(GamePath, addon, map);
@@ -593,14 +629,24 @@ internal sealed class GameSession : IAsyncDisposable
     public async Task WaitUntilReadyAsync(string? map, long afterSequence, CancellationToken cancellationToken)
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(ReadyTimeout);
+        var readyTimeout = Addon != null ? AddonToolsReadyTimeout : ReadyTimeout;
+        timeoutSource.CancelAfter(readyTimeout);
 
         try
         {
             if (map != null)
             {
-                await WaitForLineAsync(ReadyLine, afterSequence, timeoutSource.Token).ConfigureAwait(false);
-                ThrowIfOtherMap(map, afterSequence);
+                // At startup the game can first load the empty main menu map, which also writes the ready line. The map command
+                // writes one of these lines when it runs, so only a ready line after it belongs to the requested map.
+                var start = await WaitForAnyLineAsync([MapStartLine, WorkshopMapStartLine, InvalidMapLine], afterSequence, timeoutSource.Token).ConfigureAwait(false);
+
+                if (start.Text.Contains(InvalidMapLine, StringComparison.Ordinal))
+                {
+                    throw new ToolException($"The game refused the map: {start.Text.Trim()}");
+                }
+
+                await WaitForLineAsync(ReadyLine, start.Sequence, timeoutSource.Token).ConfigureAwait(false);
+                ThrowIfOtherMap(map, start.Sequence);
             }
 
             // The marker round trip shows that the main thread runs frames and processes commands
@@ -609,7 +655,7 @@ internal sealed class GameSession : IAsyncDisposable
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             ThrowIfStopped();
-            throw new ToolException($"The game did not become ready in {ReadyTimeout.TotalMinutes} minutes. Read the log for errors.");
+            throw new ToolException($"The game did not become ready in {readyTimeout.TotalMinutes} minutes. Read the log for errors.");
         }
     }
 
@@ -727,6 +773,14 @@ internal sealed class GameSession : IAsyncDisposable
         // The log can already have the restart lines from the map load, so only lines after this sequence number count
         var afterSequence = Client.Log.LastSequence;
 
+        // Without a T spawn point the player stays unassigned and has no pawn, so setpos does nothing. ent_create places
+        // the spawn point where the player looks; noclip and setpos move the pawn from there.
+        if (ContainsText(await RunAsync("ent_find info_player_terrorist", cancellationToken).ConfigureAwait(false), "Found 0 matches"))
+        {
+            await RunAsync("ent_create info_player_terrorist", cancellationToken).ConfigureAwait(false);
+            Log.Info("The map has no info_player_terrorist. The setup created one.");
+        }
+
         await RunAsync(string.Join("; ", CounterStrikeSetupCommands), cancellationToken).ConfigureAwait(false);
 
         // jointeam also starts a match, so only the BeginMatch line after the restart message shows the end of the restart
@@ -840,6 +894,11 @@ internal sealed class GameSession : IAsyncDisposable
 
         var loadedMap = lines[0].Text[Prefix.Length..].TrimEnd('"');
 
+        if (loadedMap.StartsWith("maps/", StringComparison.OrdinalIgnoreCase))
+        {
+            loadedMap = loadedMap["maps/".Length..];
+        }
+
         if (!string.Equals(loadedMap, map, StringComparison.OrdinalIgnoreCase))
         {
             throw new ToolException($"The game loaded '{loadedMap}', not '{map}'. Read get_log for errors, for example a map that the game could not mount or a client that did not connect to its local server.");
@@ -872,12 +931,12 @@ internal sealed class GameSession : IAsyncDisposable
         return result.Lines;
     }
 
-    /// <summary>Waits for a log line after <paramref name="afterSequence"/> that contains the text. The game exit closes the connection and stops the wait.</summary>
-    private async Task<LogLine> WaitForLineAsync(string text, long afterSequence, CancellationToken cancellationToken)
+    /// <summary>Waits for a log line after <paramref name="afterSequence"/> that contains one of the texts. The game exit closes the connection and stops the wait.</summary>
+    private async Task<LogLine> WaitForAnyLineAsync(string[] texts, long afterSequence, CancellationToken cancellationToken)
     {
         try
         {
-            return await Client.WaitForLineAsync(line => line.Sequence > afterSequence && line.Text.Contains(text, StringComparison.Ordinal), cancellationToken).ConfigureAwait(false);
+            return await Client.WaitForLineAsync(line => line.Sequence > afterSequence && texts.Any(text => line.Text.Contains(text, StringComparison.Ordinal)), cancellationToken).ConfigureAwait(false);
         }
         catch (IOException)
         {
@@ -885,6 +944,9 @@ internal sealed class GameSession : IAsyncDisposable
             throw;
         }
     }
+
+    /// <summary>Waits for a log line after <paramref name="afterSequence"/> that contains the text. The game exit closes the connection and stops the wait.</summary>
+    private Task<LogLine> WaitForLineAsync(string text, long afterSequence, CancellationToken cancellationToken) => WaitForAnyLineAsync([text], afterSequence, cancellationToken);
 
     private static async Task<VConsoleClient> ConnectAsync(Process game, int port, CancellationToken cancellationToken)
     {

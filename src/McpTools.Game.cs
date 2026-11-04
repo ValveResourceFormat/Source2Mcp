@@ -16,9 +16,11 @@ internal sealed partial class McpTools
     // More than one frame, in case the game shows a frame later than the frame that ran the command
     private const int DefaultSettleFrames = 3;
 
-    private const string SetupDescription = "After the map is loaded, make a stable test environment. In CS2, the setup removes the bots, stops the round end, freeze time and fall damage, and puts the player alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view, so that the camera tool can move the camera. The intro view shows only on the first load of dl_hideout. On other Deadlock maps, the setup looks for the intro view for 5 seconds, then stops. In Dota 2, the setup stops the creep spawns, removes the fog of war, and starts the game with no hero. Half-Life: Alyx and SteamVR Home have no setup.";
+    private const string SetupDescription = "After the map is loaded, make a stable test environment. In CS2, the setup creates a T spawn point when the map has none, removes the bots, stops the round end, freeze time and fall damage, and puts the player alive on the T team. On the Deadlock map dl_hideout, the setup removes the intro view, so that the camera tool can move the camera. The intro view shows only on the first load of dl_hideout. On other Deadlock maps, the setup looks for the intro view for 5 seconds, then stops. In Dota 2, the setup stops the creep spawns, removes the fog of war, and starts the game with no hero. Half-Life: Alyx and SteamVR Home have no setup.";
 
-    private const string AddonDescription = "Load the map from this addon. CS2 loads subscribed workshop items by id with map_workshop. Dota 2 loads folders in dota_addons with dota_launch_custom_game. Half-Life: Alyx loads folders in hlvr_addons and subscribed workshop items with addon_enable and addon_play. addon_enable changes default_enabled_addons_list, which quit and restore_cvars set back. SteamVR Home has all its maps in addons, and loads folders in steamtours_addons and subscribed workshop items with destinations_load_addon. 'map' is the name of the map in the addon, for example supervillain_lair in the SteamVR Home workshop item 1449138879.";
+    private const string AddonDescription = "Load the map from this addon. CS2 loads subscribed workshop items by id with map_workshop, and the maps of the folder that launch mounted with 'addon'. Dota 2 loads folders in dota_addons with dota_launch_custom_game. Half-Life: Alyx loads folders in hlvr_addons and subscribed workshop items with addon_enable and addon_play. addon_enable changes default_enabled_addons_list, which quit and restore_cvars set back. SteamVR Home has all its maps in addons, and loads folders in steamtours_addons and subscribed workshop items with destinations_load_addon. 'map' is the name of the map in the addon, for example supervillain_lair in the SteamVR Home workshop item 1449138879.";
+
+    private const string LaunchAddonDescription = "CS2: a folder in game/csgo_addons that has the compiled map in its maps folder. The game starts in tools mode with -addon, which mounts the folder and compiles stale sources of the addon before the map loads, so the call waits up to 30 minutes. Tools mode writes side files into the addon folder. The map tool then loads other maps of the same addon with this name in 'addon'.";
 
     private const string CompareDescription = "After the setup, prepare repeatable screenshots: set cl_drawhud 0, r_drawviewmodel 0 and r_drawpanorama 0, and r_always_render_all_windows 1 and r_vconsole_foregroundforcerender 1 where the game shows them. With a map, also turn noclip on, except in Dota 2. The reply gives the value of each cvar after the setup. quit and restore_cvars set the cvars back. Run it again after a map change, because the new player has no noclip.";
 
@@ -121,9 +123,12 @@ internal sealed partial class McpTools
     [Tool("Start a game and connect to its VConsole2 port. The game starts with -insecure and sv_cheats 1, in a window. With 'map', the call returns when the map is loaded and the setup is complete. Without 'map', it returns when the game runs console commands. Only one game can run at a time. When the previous game exited or lost its connection, launch closes it and reports it in 'previous_session'. Launch sets engine_no_focus_sleep 0, so that the game renders at full rate without focus. quit and restore_cvars set it back.")]
     private async Task<object> Launch(
         [Description("The game to start.")] Game game,
-        [Description("The local map to load, for example de_dust2. To load a map from an addon, use the map tool after launch.")] string? map = null,
+        [Description("The local map to load, for example de_dust2. To load a map from a workshop item, or from an addon in another game, use the map tool after launch.")] string? map = null,
+        [Description(LaunchAddonDescription)] string? addon = null,
         [Description("Window width in pixels.")][Range(320, 7680)] int width = 1280,
         [Description("Window height in pixels.")][Range(240, 4320)] int height = 720,
+        [Description("Left edge of the window on the virtual desktop in pixels, for example on a second screen. Give it with 'y'.")][Range(-32768, 32767)] int? x = null,
+        [Description("Top edge of the window on the virtual desktop in pixels. Give it with 'x'.")][Range(-32768, 32767)] int? y = null,
         [Description(SetupDescription)] bool setup = true,
         [Description("Start the game in tools mode with -tools. Tools mode shows the defensive cvars and commands, for example screenshot. SteamVR Home always starts in tools mode, because it allows sv_cheats only there. Deadlock cannot start in tools mode and stops with an error.")] bool tools = false,
         [Description(CompareDescription)] bool compare = false,
@@ -139,6 +144,17 @@ internal sealed partial class McpTools
         }
 
         ThrowIfCompareOptionsWithoutCompare(compare, exposure, hostFramerate);
+        ThrowIfInvalidAddonName(addon);
+
+        if (addon != null && (game != Game.Cs2 || map == null))
+        {
+            throw new ArgumentException("'addon' in launch needs CS2 and 'map'.");
+        }
+
+        if ((x == null) != (y == null))
+        {
+            throw new ArgumentException("Give 'x' and 'y' together.");
+        }
 
         PreviousSessionReply? previous = null;
 
@@ -154,7 +170,7 @@ internal sealed partial class McpTools
         }
 
         var start = Stopwatch.GetTimestamp();
-        var session = await GameSession.StartAsync(profile, map, width, height, tools, cancellationToken).ConfigureAwait(false);
+        var session = await GameSession.StartAsync(profile, map, addon, width, height, x, y, tools, cancellationToken).ConfigureAwait(false);
 
         // get_log and get_status can read the session while the game loads
         _session = session;
